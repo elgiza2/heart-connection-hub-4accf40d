@@ -353,12 +353,27 @@ export async function beginExecution(
   supabase: SupabaseClient,
   run: RunRow,
   auto = false,
+  revisedSteps?: string[],
 ): Promise<RunRow> {
   const goal = String(run.goal ?? "");
   const plan = await planOf(supabase, run.plan_id);
-  const planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
+  let planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
   const planTools: string[] = Array.isArray(plan?.steps?.tools) ? plan!.steps.tools : [];
+
+  // The user edited the checklist before continuing — that wins over the model's.
+  if (revisedSteps && revisedSteps.length) {
+    planSteps = revisedSteps.slice(0, 20).map((s) => String(s).slice(0, 400));
+    if (run.plan_id) {
+      await supabase
+        .from("agent_plans")
+        .update({ steps: { ...(plan?.steps ?? {}), steps: planSteps, edited_by_user: true } })
+        .eq("id", run.plan_id);
+    }
+    await addEvent(supabase, run.id, "عدّلت الخطة", "plan", planSteps.join("\n"));
+  }
+
   const memory = memoryBlock(await recallMemory(supabase, run.user_id, goal));
+
 
   await supabase
     .from("long_runs")
