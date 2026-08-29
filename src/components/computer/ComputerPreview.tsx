@@ -27,7 +27,7 @@ export function ComputerPreview({
   plan?: string[];
   onClose?: () => void;
 }) {
-  const { run, events, stop } = useLongRun(runId);
+  const { run, events, question, stop, answer } = useLongRun(runId);
   const [control, setControl] = useState(false);
   const [openSteps, setOpenSteps] = useState(true);
   const [full, setFull] = useState(false);
