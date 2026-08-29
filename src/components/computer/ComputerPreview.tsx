@@ -355,17 +355,44 @@ export function ComputerPreview({
         )}
       </div>
 
-      {/* steering: queue a note or stop, while the agent keeps working */}
+      {/* steering as one line of text: type a note, or stop */}
       {active && !question && !run?.awaiting_plan_ack && (
-        <AgentSteerBar
-          queued={run?.pending_guidance ?? []}
-          steering={run?.pending_steering ?? []}
-          onGuide={guide}
-          onSteer={steer}
-          onSoftStop={softStop}
-          onStop={stop}
-        />
+        <div className="flex flex-col gap-1">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const text = note.trim();
+              if (!text) return;
+              setNote("");
+              void steer(text);
+            }}
+            className="flex items-center gap-2"
+          >
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="وجّهني وأنا شغال…"
+              className="flex-1 border-0 border-b border-border/50 bg-transparent px-0 py-1 text-[13px] outline-none focus:border-primary"
+            />
+            <button type="submit" className="text-[12px] text-primary">
+              إرسال
+            </button>
+            <button
+              type="button"
+              onClick={() => void softStop()}
+              className="text-[12px] text-muted-foreground hover:text-foreground"
+            >
+              وقف بعد الخطوة
+            </button>
+          </form>
+          {(run?.pending_steering ?? []).concat(run?.pending_guidance ?? []).length > 0 && (
+            <p className="text-[11.5px] text-muted-foreground">
+              في الطابور: {(run?.pending_steering ?? []).concat(run?.pending_guidance ?? []).join(" · ")}
+            </p>
+          )}
+        </div>
       )}
+
 
       {/* 2 — final answer, plain text outside the card */}
       {finished && finalText && (
