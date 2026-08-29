@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Maximize2, Minimize2 } from "lucide-react";
 import { useLongRun } from "@/hooks/useLongRun";
 import { clearActiveComputerRun, setActiveComputerRun } from "@/lib/computer/activeRun";
+import { AgentQuestionCard } from "./AgentQuestionCard";
+
 
 function formatElapsed(from?: string | null): string {
   if (!from) return "0m";
