@@ -211,12 +211,75 @@ async function superviseRun(run: RunRow): Promise<{ keep_going: boolean; directi
   return { keep_going: parsed.keep_going !== false, directive };
 }
 
+/**
+ * The supervisor signs off the plan instead of the user: it reads the plan like a
+ * manager would, adjusts it, and hands the worker its opening order.
+ */
+async function supervisorReviewPlan(
+  goal: string,
+  plan: string[],
+  memory: string,
+): Promise<{ steps: string[]; directive: string }> {
+  const parsed = await askJson<{ steps?: unknown; directive?: unknown }>(
+    `You are the supervising manager of a worker agent. The worker proposed a plan for a task.
+You approve or rewrite it yourself — the user is NOT asked. Reply with JSON only:
+{"steps":["..."],"directive":"the first concrete order for the worker, in the user's language"}
+Keep 3-8 steps, remove filler, add any verification step the worker forgot.`,
+    [
+      {
+        role: "user",
+        content: [memory, `Task: ${goal}`, `Proposed plan:\n- ${plan.join("\n- ")}`]
+          .filter(Boolean)
+          .join("\n\n"),
+      },
+    ],
+  );
+  const steps = Array.isArray(parsed?.steps)
+    ? parsed!.steps.map((s) => String(s)).filter(Boolean).slice(0, 8)
+    : [];
+  return {
+    steps: steps.length ? steps : plan,
+    directive: String(parsed?.directive ?? "ابدأ بأول خطوة في الخطة ونفّذها بالكامل.").slice(0, 500),
+  };
+}
+
+/**
+ * The supervisor writes the message the user actually reads: what happened, what
+ * was delivered, and — when something is blocking — what it needs from the user
+ * plus the options it suggests.
+ */
+async function supervisorReport(
+  run: RunRow,
+  summary: string,
+  files: string[],
+): Promise<string> {
+  const transcript: string[] = Array.isArray(run.result?.transcript) ? run.result.transcript : [];
+  const text = await askModel(
+    `You are the supervising manager reporting to the user in their own language (Arabic if the task is Arabic).
+Write a short clean report: what was accomplished, what was delivered, and any problem that came up with the options you suggest for it.
+No JSON, no markdown headers, no bullet spam — at most 6 short lines. Never invent results.`,
+    [
+      {
+        role: "user",
+        content: [
+          `Task: ${run.goal}`,
+          `Worker summary: ${summary}`,
+          `Files delivered: ${files.join(", ") || "none"}`,
+          `Work log:\n${transcript.slice(-24).join("\n")}`,
+        ].join("\n\n"),
+      },
+    ],
+  );
+  return (text?.trim() || summary).slice(0, 2000);
+}
+
 /** Blockers a human really has to handle — everything else the agent solves itself. */
 function needsHuman(text: string): boolean {
   return /(captcha|كابتشا|recaptcha|2fa|two-factor|otp|كود التحقق|verification code|payment|credit card|بطاقة|ادفع|الدفع|refund|delete account|حذف الحساب)/i.test(
     text,
   );
 }
+
 
 
 /* -------------------------------------------------------------------- public */
@@ -253,22 +316,29 @@ export async function startRun(
   const memory = await recallMemory(userId);
   const plan = await makePlan(goal, memory);
   const risk = riskFloor(goal) === "high" ? "high" : plan.risk;
-  const autoAllowed = risk === "low";
 
-  await event(run.id, "plan", "الخطة", plan.steps.map((s, i) => `${i + 1}. ${s}`).join("\n"));
+  // The supervisor — not the user — signs off the plan and issues the first order.
+  const approved = await supervisorReviewPlan(goal, plan.steps, memory);
+
+  await event(run.id, "plan", "الخطة", approved.steps.map((s, i) => `${i + 1}. ${s}`).join("\n"));
+  await event(run.id, "step", "المشرف وجّهني", approved.directive);
   return patch(run.id, {
-    status: "paused",
-    phase: "plan_review",
-    status_text: autoAllowed ? "الخطة جاهزة — هكمل تلقائيًا" : "الخطة جاهزة — محتاج موافقتك",
-    awaiting_plan_ack: true,
-    auto_continue_allowed: autoAllowed,
-    auto_continue_at: autoAllowed
-      ? new Date(Date.now() + AUTO_CONTINUE_MS).toISOString()
-      : null,
+    status: "running",
+    phase: "executing",
+    status_text: "بنفّذ…",
+    awaiting_plan_ack: false,
+    auto_continue_allowed: true,
+    auto_continue_at: null,
     risk_level: risk,
-    result: { ...(run.result ?? {}), plan: plan.steps, transcript: [] },
+    result: {
+      ...(run.result ?? {}),
+      plan: approved.steps,
+      supervisor: approved.directive,
+      transcript: [`SUPERVISOR: ${approved.directive}`],
+    },
   });
 }
+
 
 export async function approvePlan(runId: string, planSteps?: string[]): Promise<RunRow | null> {
   const run = await loadRun(runId);
@@ -438,12 +508,18 @@ export async function tick(runId: string): Promise<RunRow | null> {
         // Everything else becomes an internal "think it through" step, so the
         // task keeps moving instead of dying on the first obstacle.
         if (!needsHuman(`${question} ${reason}`) && selfSolveTries < 3) {
-          await event(
-            runId,
-            "step",
-            "ظهرت مشكلة — بفكر في طريقة تانية",
-            `${question}${reason ? `\n${reason}` : ""}`,
-          );
+          // Ask the manager what to do instead of bothering the user.
+          const verdict = await superviseRun({
+            ...run,
+            result: {
+              ...(run.result ?? {}),
+              transcript: [...transcript, `WORKER blocked: ${question} ${reason}`],
+            },
+          } as RunRow);
+          const directive =
+            verdict?.directive ||
+            "حل المشكلة بنفسك بطريقة أو مصدر مختلف وكمّل المهمة، وما توقفش.";
+          await event(runId, "step", "المشرف وجّهني", directive);
           run =
             (await patch(runId, {
               status: "running",
@@ -454,9 +530,11 @@ export async function tick(runId: string): Promise<RunRow | null> {
               result: {
                 ...(run.result ?? {}),
                 self_solve: selfSolveTries + 1,
+                supervisor: directive,
                 transcript: [
                   ...transcript,
-                  `OBSTACLE: ${question}. Do not ask the user — solve it yourself with a different method or source.`,
+                  `OBSTACLE: ${question}`,
+                  `SUPERVISOR: ${directive}`,
                 ].slice(-60),
               },
             })) ?? run;
@@ -464,15 +542,24 @@ export async function tick(runId: string): Promise<RunRow | null> {
         }
 
         const sensitive = !!args.sensitive || needsHuman(question);
+        // The manager, not the worker, phrases what it needs from the user.
+        const escalation = await superviseRun({
+          ...run,
+          result: {
+            ...(run.result ?? {}),
+            transcript: [...transcript, `WORKER needs the user: ${question} ${reason}`],
+          },
+        } as RunRow);
         await supabase.from("agent_questions").insert({
           run_id: runId,
           user_id: userId,
           question,
-          reason: args.reason ? String(args.reason) : null,
+          reason: [reason, escalation?.directive].filter(Boolean).join("\n") || null,
           options: [],
           sensitive,
           status: "open",
         } as never);
+
         await event(runId, "question", "وقفت وسألت", question);
         return patch(runId, {
           status: "paused",
@@ -638,28 +725,44 @@ async function finish(
     },
   ]);
 
-  // The supervisor gets the last word: a premature finish is sent back to work.
+  // The supervisor gets the last word: a premature finish is sent back to work,
+  // and even a good finish gets one mandatory review pass ordered by the manager.
   const supervisor = round <= MAX_REVIEW_ROUNDS ? await superviseRun(run) : null;
   const supervisorBlocks = supervisor?.keep_going === true && !!supervisor.directive;
+  const needsReviewPass = round === 1 && verdict?.done !== false && !supervisorBlocks;
 
-  if ((verdict?.done === false || supervisorBlocks) && round <= MAX_REVIEW_ROUNDS) {
-    const gap = String(verdict?.gap ?? supervisor?.directive ?? "فيه حاجة ناقصة");
-    await event(runId, "step", "المراجعة لقت نقص — بكمّل", gap);
+  if ((verdict?.done === false || supervisorBlocks || needsReviewPass) && round <= MAX_REVIEW_ROUNDS) {
+    const gap = needsReviewPass
+      ? supervisor?.directive ??
+        "راجع كل اللي عملته خطوة خطوة، اتأكد إن كل مخرج موجود وصحيح، وبعدها بس اعتبرها خلصت."
+      : String(verdict?.gap ?? supervisor?.directive ?? "فيه حاجة ناقصة");
+    await event(
+      runId,
+      "step",
+      needsReviewPass ? "المشرف طلب مراجعة نهائية" : "المراجعة لقت نقص — بكمّل",
+      gap,
+    );
     return patch(runId, {
       status: "running",
       phase: "executing",
-      status_text: "بأستكمل النقص اللي لقيته في المراجعة",
+      status_text: needsReviewPass ? "بأراجع اللي عملته قبل التسليم" : "بأستكمل النقص اللي لقيته في المراجعة",
       review_round: round,
       result: {
         ...(run.result ?? {}),
-        supervisor: supervisor?.directive ?? null,
-        transcript: [...transcript, `SELF-REVIEW: not done yet — ${gap}`],
+        supervisor: gap,
+        transcript: [
+          ...transcript,
+          needsReviewPass ? `SUPERVISOR: ${gap}` : `SELF-REVIEW: not done yet — ${gap}`,
+        ],
         files: filesToArtifacts(ctx),
       },
     });
   }
 
-  await event(runId, "result", "خلصت", summary);
+  // The manager writes the message the user reads.
+  const files = filesToArtifacts(ctx);
+  const report = await supervisorReport(run, summary, [...ctx.files.keys()]);
+  await event(runId, "result", "خلصت", report);
   const updated = await patch(runId, {
     status: "done",
     phase: "finished",
@@ -668,11 +771,13 @@ async function finish(
     review_round: round,
     result: {
       ...(run.result ?? {}),
-      summary,
+      summary: report,
+      worker_summary: summary,
       transcript,
-      files: filesToArtifacts(ctx),
+      files,
     },
   });
+
   fileCache.delete(runId);
   return updated;
 }
