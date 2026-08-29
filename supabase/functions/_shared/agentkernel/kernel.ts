@@ -13,7 +13,7 @@ import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { memoryBlock, recallMemory, learnFromRun, remember } from "./memory.ts";
 import { fingerprint, loopInstruction, verdictFor } from "./loopGuard.ts";
 import { askUser, detectBlock, detectLargeAmount, openQuestion, resolveQuestion } from "./questions.ts";
-import { critique, makePlan, savePlanReview } from "./planner.ts";
+import { classifyPlanRisk, critique, makePlan, savePlanReview } from "./planner.ts";
 import { webSearch } from "./tools.ts";
 import { type AgentAction, decideNextAction, runTool } from "./executor.ts";
 
@@ -289,6 +289,8 @@ export async function startRun(
 
     // 2 — plan.
     const plan = await makePlan(supabase, run, memory);
+    const riskLevel = classifyPlanRisk(goal);
+    const autoContinueAllowed = riskLevel === "low";
     const planText = [
       ...plan.steps.map((step, index) => `${index + 1}. ${step}`),
       plan.success_criteria ? `\nمعيار النجاح: ${plan.success_criteria}` : "",
@@ -326,11 +328,17 @@ export async function startRun(
       .update({
         plan_id: plan.id,
         kind: plan.kind === "browser" ? "browser" : "agentic",
+        risk_level: riskLevel,
+        auto_continue_allowed: autoContinueAllowed,
         status: "paused",
         phase: "plan_review",
         awaiting_plan_ack: true,
-        auto_continue_at: new Date(Date.now() + PLAN_ACK_MS).toISOString(),
-        status_text: "مستني موافقتك على الخطة (هكمّل تلقائي بعد 60 ثانية)",
+        auto_continue_at: autoContinueAllowed
+          ? new Date(Date.now() + PLAN_ACK_MS).toISOString()
+          : null,
+        status_text: autoContinueAllowed
+          ? "مستني موافقتك على الخطة (هكمّل تلقائي بعد 60 ثانية)"
+          : "الخطة فيها إجراء مؤثر وبتحتاج موافقة صريحة",
         last_heartbeat_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
@@ -355,6 +363,7 @@ export async function beginExecution(
   auto = false,
   revisedSteps?: string[],
 ): Promise<RunRow> {
+  if (auto && run.auto_continue_allowed === false) return run;
   const goal = String(run.goal ?? "");
   const plan = await planOf(supabase, run.plan_id);
   let planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
@@ -445,6 +454,14 @@ export async function tickRun(supabase: SupabaseClient, run: RunRow): Promise<Ru
   const status = typeof run.status === "string" ? run.status : "queued";
   if (["done", "error", "canceled"].includes(status)) return run;
   if (run.needs_input) return run;
+  if (run.stop_requested) {
+    await addEvent(supabase, run.id, "وقفت عند نقطة آمنة وحفظت الشغل الحالي", "status");
+    await supabase
+      .from("long_runs")
+      .update({ status: "canceled", phase: "finished", stop_requested: false, status_text: "توقفت بأمان", updated_at: new Date().toISOString() })
+      .eq("id", run.id);
+    return { ...run, status: "canceled", phase: "finished", stop_requested: false };
+  }
 
   const now = Date.now();
   const startedAt = Date.parse(run.created_at ?? new Date().toISOString());
@@ -457,6 +474,7 @@ export async function tickRun(supabase: SupabaseClient, run: RunRow): Promise<Ru
   // Waiting for "Continue": auto-proceed once the 60s window is over. This runs
   // from cron too, so the timer holds even with the tab closed.
   if (run.awaiting_plan_ack) {
+    if (run.auto_continue_allowed === false) return run;
     const due = Date.parse(run.auto_continue_at ?? new Date(0).toISOString());
     if (!Number.isFinite(due) || now >= due) return await beginExecution(supabase, run, true);
     return run;
@@ -649,6 +667,23 @@ async function drainGuidance(supabase: SupabaseClient, run: RunRow): Promise<str
   return text;
 }
 
+/** Steering interrupts the next safe decision; queued guidance waits for the next tick. */
+async function drainSteering(supabase: SupabaseClient, run: RunRow): Promise<string> {
+  const { data } = await supabase
+    .from("long_runs")
+    .select("pending_steering")
+    .eq("id", run.id)
+    .maybeSingle();
+  const notes: string[] = Array.isArray((data as any)?.pending_steering)
+    ? ((data as any).pending_steering as string[])
+    : [];
+  if (!notes.length) return "";
+  await supabase.from("long_runs").update({ pending_steering: [] }).eq("id", run.id);
+  const text = notes.join("\n");
+  await addEvent(supabase, run.id, "غيّرت المسار عند أول نقطة آمنة", "log", text.slice(0, 800));
+  return text;
+}
+
 
 /**
  * One bounded slice of the ReAct loop: think, use a tool, record the
@@ -666,6 +701,12 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
   let stepCount = Number(run.step_count ?? 0);
 
   for (let i = 0; i < STEPS_PER_TICK && Date.now() < deadline; i += 1) {
+    const { data: control } = await supabase
+      .from("long_runs")
+      .select("stop_requested")
+      .eq("id", current.id)
+      .maybeSingle();
+    if (control?.stop_requested) return await tickRun(supabase, { ...current, stop_requested: true });
     if (stepCount > MAX_STEPS) {
       await finish(supabase, current, "error", "Step budget exhausted");
       return { ...current, status: "error" };
@@ -673,7 +714,8 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
 
     // Mid-run steering: whatever the user queued while we were working gets
     // folded into the very next decision, then cleared.
-    const guidance = await drainGuidance(supabase, current);
+    const steering = await drainSteering(supabase, current);
+    const guidance = i === 0 ? await drainGuidance(supabase, current) : "";
 
     const transcript = await agenticTranscript(supabase, current.id);
     const action: AgentAction | null = await decideNextAction(supabase, {
@@ -683,7 +725,8 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
       transcript,
       extra:
         [
-          guidance ? `The user just steered you mid-run: ${guidance}\nFollow it now.` : null,
+          steering ? `The user changed direction at this safe checkpoint: ${steering}\nFollow it now.` : null,
+          guidance ? `The user queued this for the next work cycle: ${guidance}\nAccount for it now.` : null,
           strikes >= 1
             ? "Your last action produced nothing new. Change your approach — different tool, different input."
             : null,
@@ -1127,7 +1170,8 @@ export async function answerRun(
   const question = await openQuestion(supabase, run.id);
   if (!question) return run;
   await resolveQuestion(supabase, question.id, run.id, answer);
-  await addEvent(supabase, run.id, "You answered", "answer", answer.slice(0, 400));
+  const safeAnswer = question.sensitive ? "تمت الخطوة الحساسة بواسطة المستخدم" : answer.slice(0, 400);
+  await addEvent(supabase, run.id, "You answered", "answer", safeAnswer);
 
   if (!question.sensitive) {
     await remember(supabase, run.user_id, {
@@ -1159,7 +1203,9 @@ export async function answerRun(
   }
 
   const externalId = typeof run.external_run_id === "string" ? run.external_run_id : "";
-  const followUp = `The user answered your question: ${answer}\nContinue the task from where you stopped.`;
+  const followUp = question.sensitive
+    ? "The user completed the sensitive step directly in the live browser. Continue from where you stopped."
+    : `The user answered your question: ${answer}\nContinue the task from where you stopped.`;
 
 
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { HelpCircle, Send } from "lucide-react";
+import { Hand, HelpCircle, Send } from "lucide-react";
 import type { AgentQuestion } from "@/lib/longrun/types";
+import { Button } from "@/components/ui/button";
 
 /**
  * The agent stopped and asked. Shown inside the computer surface so the user can
@@ -15,6 +16,7 @@ export function AgentQuestionCard({
 }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const handoff = ["captcha", "login", "otp"].includes(question.reason ?? "");
 
   const send = async (value: string) => {
     if (!value.trim() || busy) return;
@@ -33,11 +35,13 @@ export function AgentQuestionCard({
         <HelpCircle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--megsy-blue,#3b82f6)]" />
         <div className="flex-1">
           <p className="text-[13px] leading-relaxed">{question.question}</p>
-          {question.sensitive && (
+          {handoff ? (
             <p className="mt-1 text-[11px] text-muted-foreground">
-              Sent straight to the task and never stored.
+              لا تكتب كلمة مرور أو رمز تحقق هنا. كمّل الخطوة بنفسك في شاشة المتصفح ثم اضغط استئناف.
             </p>
-          )}
+          ) : question.sensitive ? (
+            <p className="mt-1 text-[11px] text-muted-foreground">لن يظهر ردّك الحساس في سجل التنفيذ.</p>
+          ) : null}
 
           {question.options.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-2">
@@ -55,7 +59,12 @@ export function AgentQuestionCard({
             </div>
           )}
 
-          <form
+          {handoff ? (
+            <Button type="button" size="sm" className="mt-3" disabled={busy} onClick={() => void send("تمت الخطوة الحساسة في المتصفح")}>
+              <Hand className="h-4 w-4" />
+              استئناف بعد ما خلّصت
+            </Button>
+          ) : <form
             className="mt-2 flex items-center gap-2"
             onSubmit={(e) => {
               e.preventDefault();
@@ -78,7 +87,7 @@ export function AgentQuestionCard({
             >
               <Send className="h-4 w-4" />
             </button>
-          </form>
+          </form>}
         </div>
       </div>
     </div>

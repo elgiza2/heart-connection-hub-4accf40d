@@ -23,6 +23,8 @@ export interface LongRunPayload {
     | "answer"
     | "approve_plan"
     | "guide"
+    | "steer"
+    | "soft_stop"
     | "cron_tick";
   token?: string;
   goal?: string;
@@ -110,20 +112,34 @@ export async function handleLongRun(payload: LongRunPayload | null, tickSecret?:
 
   }
 
-  if (payload?.action === "guide") {
+  if (payload?.action === "guide" || payload?.action === "steer") {
     const run = await loadOwnedRun(supabase, user.id, payload.run_id);
     if (!run) return { status: 404, body: { error: "Unknown run" } };
     const note = (payload.guidance ?? "").trim().slice(0, 2000);
     if (!note) return { status: 400, body: { error: "Empty guidance" } };
-    const queued: string[] = Array.isArray((run as { pending_guidance?: string[] }).pending_guidance)
-      ? (run as { pending_guidance: string[] }).pending_guidance
+    const field = payload.action === "steer" ? "pending_steering" : "pending_guidance";
+    const queued: string[] = Array.isArray((run as Record<string, unknown>)[field])
+      ? ((run as Record<string, unknown>)[field] as string[])
       : [];
     const { data: updated } = await supabase
       .from("long_runs")
-      .update({ pending_guidance: [...queued, note].slice(-10) })
+      .update({ [field]: [...queued, note].slice(-10) })
       .eq("id", run.id)
       .select("*")
       .single();
+    return { status: 200, body: { ok: true, run: updated ?? run } };
+  }
+
+  if (payload?.action === "soft_stop") {
+    const run = await loadOwnedRun(supabase, user.id, payload.run_id);
+    if (!run) return { status: 404, body: { error: "Unknown run" } };
+    const { data: updated } = await supabase
+      .from("long_runs")
+      .update({ stop_requested: true, status_text: "هقف عند أقرب نقطة آمنة", updated_at: new Date().toISOString() })
+      .eq("id", run.id)
+      .select("*")
+      .single();
+    await addEvent(supabase, run.id, "طلبت إيقافًا آمنًا", "status");
     return { status: 200, body: { ok: true, run: updated ?? run } };
   }
 

@@ -32,6 +32,12 @@ export interface LongRun {
   auto_continue_at?: string | null;
   /** Notes the user queued mid-run; folded into the agent's next decision. */
   pending_guidance?: string[] | null;
+  /** Immediate steering is consumed at the next safe tool boundary. */
+  pending_steering?: string[] | null;
+  /** Safety metadata is decided server-side and cannot be downgraded by the model. */
+  risk_level?: "low" | "medium" | "high" | null;
+  auto_continue_allowed?: boolean | null;
+  stop_requested?: boolean | null;
   created_at: string;
   updated_at: string;
 }

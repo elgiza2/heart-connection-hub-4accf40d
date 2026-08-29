@@ -13,6 +13,10 @@ export interface BlockSignal {
   sensitive: boolean;
 }
 
+export function requiresBrowserHandoff(reason?: string | null): boolean {
+  return reason === "captcha" || reason === "login" || reason === "otp";
+}
+
 const PATTERNS: { re: RegExp; question: string; reason: string; sensitive: boolean }[] = [
   {
     re: /\b(captcha|recaptcha|hcaptcha|cloudflare turnstile|i'?m not a robot|verify you are human)\b/i,
@@ -22,13 +26,13 @@ const PATTERNS: { re: RegExp; question: string; reason: string; sensitive: boole
   },
   {
     re: /\b(otp|one[- ]time (code|password)|verification code|2fa|two[- ]factor|authenticator code|sms code)\b/i,
-    question: "The site is asking for a one-time verification code. What code should I enter?",
+    question: "The site needs one-time verification. Complete it yourself in the live browser, then resume the task.",
     reason: "otp",
     sensitive: true,
   },
   {
     re: /\b(sign in|log in|login) (required|needed)|enter your (password|credentials)|incorrect password|account locked\b/i,
-    question: "The site needs account credentials I don't have. How should I sign in?",
+    question: "Sign in yourself in the live browser so your credentials never pass through chat, then resume the task.",
     reason: "login",
     sensitive: true,
   },
@@ -129,9 +133,15 @@ export async function resolveQuestion(
   answer: string,
 ): Promise<void> {
   const now = new Date().toISOString();
+  const { data: question } = await supabase
+    .from("agent_questions")
+    .select("sensitive,reason")
+    .eq("id", questionId)
+    .maybeSingle();
+  const redact = Boolean(question?.sensitive) || requiresBrowserHandoff(question?.reason);
   await supabase
     .from("agent_questions")
-    .update({ answer, status: "answered", answered_at: now, updated_at: now })
+    .update({ answer: redact ? null : answer, status: "answered", answered_at: now, updated_at: now })
     .eq("id", questionId);
   await supabase
     .from("long_runs")
