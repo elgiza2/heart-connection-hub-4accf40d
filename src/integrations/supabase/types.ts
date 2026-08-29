@@ -156,6 +156,48 @@ export type Database = {
           },
         ]
       }
+      agent_credentials: {
+        Row: {
+          created_at: string
+          created_by: string
+          id: string
+          login_email: string
+          notes: string | null
+          password: string
+          site: string
+          site_url: string | null
+          updated_at: string
+          user_id: string
+          username: string | null
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string
+          id?: string
+          login_email: string
+          notes?: string | null
+          password: string
+          site: string
+          site_url?: string | null
+          updated_at?: string
+          user_id: string
+          username?: string | null
+        }
+        Update: {
+          created_at?: string
+          created_by?: string
+          id?: string
+          login_email?: string
+          notes?: string | null
+          password?: string
+          site?: string
+          site_url?: string | null
+          updated_at?: string
+          user_id?: string
+          username?: string | null
+        }
+        Relationships: []
+      }
       agent_evals: {
         Row: {
           created_at: string
