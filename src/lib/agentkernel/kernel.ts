@@ -508,12 +508,18 @@ export async function tick(runId: string): Promise<RunRow | null> {
         // Everything else becomes an internal "think it through" step, so the
         // task keeps moving instead of dying on the first obstacle.
         if (!needsHuman(`${question} ${reason}`) && selfSolveTries < 3) {
-          await event(
-            runId,
-            "step",
-            "ظهرت مشكلة — بفكر في طريقة تانية",
-            `${question}${reason ? `\n${reason}` : ""}`,
-          );
+          // Ask the manager what to do instead of bothering the user.
+          const verdict = await superviseRun({
+            ...run,
+            result: {
+              ...(run.result ?? {}),
+              transcript: [...transcript, `WORKER blocked: ${question} ${reason}`],
+            },
+          } as RunRow);
+          const directive =
+            verdict?.directive ||
+            "حل المشكلة بنفسك بطريقة أو مصدر مختلف وكمّل المهمة، وما توقفش.";
+          await event(runId, "step", "المشرف وجّهني", directive);
           run =
             (await patch(runId, {
               status: "running",
@@ -524,9 +530,11 @@ export async function tick(runId: string): Promise<RunRow | null> {
               result: {
                 ...(run.result ?? {}),
                 self_solve: selfSolveTries + 1,
+                supervisor: directive,
                 transcript: [
                   ...transcript,
-                  `OBSTACLE: ${question}. Do not ask the user — solve it yourself with a different method or source.`,
+                  `OBSTACLE: ${question}`,
+                  `SUPERVISOR: ${directive}`,
                 ].slice(-60),
               },
             })) ?? run;
@@ -534,15 +542,24 @@ export async function tick(runId: string): Promise<RunRow | null> {
         }
 
         const sensitive = !!args.sensitive || needsHuman(question);
+        // The manager, not the worker, phrases what it needs from the user.
+        const escalation = await superviseRun({
+          ...run,
+          result: {
+            ...(run.result ?? {}),
+            transcript: [...transcript, `WORKER needs the user: ${question} ${reason}`],
+          },
+        } as RunRow);
         await supabase.from("agent_questions").insert({
           run_id: runId,
           user_id: userId,
           question,
-          reason: args.reason ? String(args.reason) : null,
+          reason: [reason, escalation?.directive].filter(Boolean).join("\n") || null,
           options: [],
           sensitive,
           status: "open",
         } as never);
+
         await event(runId, "question", "وقفت وسألت", question);
         return patch(runId, {
           status: "paused",
