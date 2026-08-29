@@ -5,7 +5,7 @@
  * human would: "this site asks for an OTP", "the user prefers paying by card",
  * "clicking Continue twice did not work last time".
  */
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { askJson } from "./llm.ts";
 
 export type MemoryKind = "user_fact" | "site_fact" | "preference" | "lesson";

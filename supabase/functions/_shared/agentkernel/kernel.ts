@@ -9,7 +9,7 @@
  * checkpoint after every step and are resumed from the last checkpoint when the
  * provider sandbox dies.
  */
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { memoryBlock, recallMemory, learnFromRun, remember } from "./memory.ts";
 import { fingerprint, loopInstruction, verdictFor } from "./loopGuard.ts";
 import { askUser, detectBlock, detectLargeAmount, openQuestion, resolveQuestion } from "./questions.ts";
@@ -21,7 +21,11 @@ const MAX_REVIEW_ROUNDS = 3;
 const DEFAULT_BUDGET_MS = 6 * 60 * 60 * 1000;
 const MAX_STEPS = 600;
 
-export type RunRow = Record<string, any>;
+export type RunRow = Record<string, any> & {
+  id: string;
+  user_id: string;
+  goal: string;
+};
 
 /* ------------------------------------------------------------------ provider */
 

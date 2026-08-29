@@ -2,12 +2,12 @@
  * Long-run HTTP surface. All the intelligence lives in the shared agent kernel
  * (`_shared/agentkernel`) so the same loop runs from the browser and from cron.
  */
-import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { addEvent, answerRun, providerFetch, startRun, tickRun } from "../_shared/agentkernel/kernel.ts";
+import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
+import { addEvent, answerRun, providerFetch, startRun, tickAllRuns, tickRun } from "../_shared/agentkernel/kernel.ts";
 import { openQuestion } from "../_shared/agentkernel/questions.ts";
 
 export interface LongRunPayload {
-  action?: "start" | "keepalive" | "status" | "stop" | "answer";
+  action?: "start" | "keepalive" | "status" | "stop" | "answer" | "cron_tick";
   token?: string;
   goal?: string;
   answer?: string;
@@ -40,8 +40,22 @@ async function loadOwnedRun(supabase: SupabaseClient, userId: string, runId?: st
   return data;
 }
 
-export async function handleLongRun(payload: LongRunPayload | null) {
+export async function handleLongRun(payload: LongRunPayload | null, tickSecret?: string) {
   const supabase = db();
+
+  if (payload?.action === "cron_tick") {
+    const { data: tickConfig } = await supabase
+      .from("agent_tick_config")
+      .select("secret")
+      .eq("id", true)
+      .maybeSingle();
+    const expected = (tickConfig as { secret?: string } | null)?.secret;
+    if (!expected || tickSecret !== expected) {
+      return { status: 403, body: { error: "Forbidden" } };
+    }
+    return { status: 200, body: { ok: true, advanced: await tickAllRuns(supabase, 25) } };
+  }
+
   const user = await getUser(supabase, payload?.token);
   if (!user) return { status: 401, body: { error: "Sign in required" } };
 

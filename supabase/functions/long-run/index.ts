@@ -13,8 +13,9 @@ Deno.serve(async (request: Request) => {
   const payload = (await request.json().catch(() => null)) as LongRunPayload | null;
   if (!payload) return json({ error: "Invalid JSON body" }, 400);
   const bearer = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? undefined;
+  const tickSecret = request.headers.get("x-agent-tick-secret") ?? undefined;
   try {
-    const result = await handleLongRun({ ...payload, token: payload.token ?? bearer });
+    const result = await handleLongRun({ ...payload, token: payload.token ?? bearer }, tickSecret);
     return json(result.body, result.status);
   } catch (error) {
     console.error("long-run", error);

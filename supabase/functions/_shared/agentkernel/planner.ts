@@ -5,7 +5,7 @@
  * When the provider says the task finished, the kernel reviews the trace and
  * the final output and decides: pass, retry (with a corrective task), or ask.
  */
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { askJson } from "./llm.ts";
 
 export interface Plan {

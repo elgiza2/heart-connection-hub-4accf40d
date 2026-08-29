@@ -5,7 +5,7 @@
  * the independent ones in parallel before the browser opens, so a single task can
  * search the web, load memory and write a file without the user orchestrating it.
  */
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { askModel } from "./llm.ts";
 
 export type ToolName =

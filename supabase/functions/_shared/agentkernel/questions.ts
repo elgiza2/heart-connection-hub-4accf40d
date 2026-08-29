@@ -5,7 +5,7 @@
  * login walls, payments, destructive actions, genuinely ambiguous pages), parks
  * the run in `needs_input`, and resumes it once the answer arrives.
  */
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 export interface BlockSignal {
   question: string;

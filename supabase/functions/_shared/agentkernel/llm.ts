@@ -5,7 +5,7 @@
  * through the user-facing chat function. It talks to the same Alibaba (Qwen)
  * models directly, using an active key from `alibaba_keys` (service-role read).
  */
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 const BASE =
   Deno.env.get("ALIBABA_API_BASE") ||
