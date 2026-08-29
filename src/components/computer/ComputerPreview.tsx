@@ -30,11 +30,14 @@ export function ComputerPreview({
   plan?: string[];
   onClose?: () => void;
 }) {
-  const { run, events, question, stop, softStop, answer, approvePlan, guide, steer } = useLongRun(runId);
+  const { run, events, question, stop, softStop, answer, approvePlan, steer } = useLongRun(runId);
   const [control, setControl] = useState(false);
   const [openSteps, setOpenSteps] = useState(true);
   const [full, setFull] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const [reply, setReply] = useState("");
+  const [note, setNote] = useState("");
+  const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
   const summarizedRef = useRef(false);
   const [, force] = useState(0);
 
@@ -42,6 +45,21 @@ export function ComputerPreview({
     const id = window.setInterval(() => force((n) => n + 1), 60_000);
     return () => window.clearInterval(id);
   }, []);
+
+  // live countdown on the auto-continue gate, rendered as plain text
+  const autoAt =
+    run?.awaiting_plan_ack && run.auto_continue_allowed !== false ? run.auto_continue_at : null;
+  useEffect(() => {
+    if (!autoAt) {
+      setSecondsLeft(null);
+      return;
+    }
+    const tick = () =>
+      setSecondsLeft(Math.max(0, Math.ceil((Date.parse(autoAt) - Date.now()) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [autoAt]);
 
   const active = run?.status === "running" || run?.status === "queued" || run?.status === "paused";
   const finished = !!run && !active;
@@ -119,6 +137,10 @@ export function ComputerPreview({
   // The plan checklist stays visible during execution, with live check marks.
   const planText =
     events.find((e) => e.type === "plan")?.detail || (plan ?? []).join("\n") || "";
+  const planLines = planText
+    .split("\n")
+    .map((line) => line.replace(/^\s*\d+[.)]\s*/, "").trim())
+    .filter(Boolean);
   const doneCount = run?.awaiting_plan_ack
     ? 0
     : events.filter((e) => e.type === "step" || e.type === "tool").length;
