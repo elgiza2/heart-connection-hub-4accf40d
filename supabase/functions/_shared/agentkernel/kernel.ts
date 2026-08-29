@@ -439,8 +439,21 @@ export async function tickRun(supabase: SupabaseClient, run: RunRow): Promise<Ru
     return { ...run, status: "error", error: "Time budget exhausted" };
   }
 
+  // Waiting for "Continue": auto-proceed once the 60s window is over. This runs
+  // from cron too, so the timer holds even with the tab closed.
+  if (run.awaiting_plan_ack) {
+    const due = Date.parse(run.auto_continue_at ?? new Date(0).toISOString());
+    if (!Number.isFinite(due) || now >= due) return await beginExecution(supabase, run, true);
+    return run;
+  }
+
+  if (String(run.kind ?? "agentic") !== "browser" && run.phase !== "browser_sub") {
+    return await tickAgentic(supabase, run);
+  }
+
   const externalId = typeof run.external_run_id === "string" ? run.external_run_id : "";
   if (!externalId) return run;
+
 
   const task = await getTask(supabase, externalId);
   if (!task) {
