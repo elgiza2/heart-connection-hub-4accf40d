@@ -15,11 +15,20 @@ import { fingerprint, loopInstruction, verdictFor } from "./loopGuard.ts";
 import { askUser, detectBlock, detectLargeAmount, openQuestion, resolveQuestion } from "./questions.ts";
 import { critique, makePlan, savePlanReview } from "./planner.ts";
 import { webSearch } from "./tools.ts";
+import { type AgentAction, decideNextAction, runTool } from "./executor.ts";
 
 const BU_BASE = Deno.env.get("BROWSER_USE_API_BASE") || "https://api.browser-use.com/api/v2";
 const MAX_REVIEW_ROUNDS = 3;
 const DEFAULT_BUDGET_MS = 6 * 60 * 60 * 1000;
 const MAX_STEPS = 600;
+/** How long the user gets to press "Continue" before the agent proceeds itself. */
+const PLAN_ACK_MS = 60_000;
+/** Tool calls executed per tick, and the wall-clock ceiling for one tick. */
+const STEPS_PER_TICK = 6;
+const TICK_DEADLINE_MS = 50_000;
+/** Announced out loud before the agent grades its own work. */
+const REVIEW_TEXT = "دلوقتي بأراجع اللي عملته";
+
 
 export type RunRow = Record<string, any> & {
   id: string;
@@ -280,13 +289,17 @@ export async function startRun(
 
     // 2 — plan.
     const plan = await makePlan(supabase, run, memory);
-    if (plan.steps.length) {
-      await addEvent(supabase, run.id, "Plan ready", "plan", plan.steps.join("\n"));
-    }
+    const planText = [
+      ...plan.steps.map((step, index) => `${index + 1}. ${step}`),
+      plan.success_criteria ? `\nمعيار النجاح: ${plan.success_criteria}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     // 3 — blocking ambiguity? ask before burning provider minutes.
     if (plan.clarify) {
       await supabase.from("long_runs").update({ plan_id: plan.id }).eq("id", run.id);
+      if (plan.steps.length) await addEvent(supabase, run.id, "الخطة", "plan", planText);
       await askUser(supabase, run, {
         question: plan.clarify,
         reason: "ambiguous_goal",
@@ -300,37 +313,31 @@ export async function startRun(
       return { status: 200, body: { ok: true, run: parked ?? run } };
     }
 
-    // 4 — independent tools in parallel (the agent's own choice, from the plan).
-    const wantsSearch = (plan.tools ?? []).includes("web_search");
-    const [research] = await Promise.all([
-      wantsSearch ? webSearch(supabase, goal) : Promise.resolve(""),
-    ]);
-    if (research) {
-      await addEvent(supabase, run.id, "Searched the web before starting", "tool", research.slice(0, 800));
-    }
-
-    // 5 — execute.
-    const task = await createTask(
+    // 4 — show the plan and wait for "Continue" — for 60s only, then go ahead.
+    await addEvent(
       supabase,
-      buildInstruction({ goal, memory, plan: plan.steps, research }),
+      run.id,
+      "دي الخطة اللي هأمشي عليها",
+      "plan",
+      planText || String(run.goal ?? ""),
     );
-    const { data: updated } = await supabase
+    const { data: pending } = await supabase
       .from("long_runs")
       .update({
-        status: mapStatus(task.status),
-        phase: "working",
         plan_id: plan.id,
-        external_run_id: task.id,
-        live_view_url: task.liveUrl ?? null,
-        status_text: plan.steps[0] ?? "Working",
+        kind: plan.kind === "browser" ? "browser" : "agentic",
+        status: "paused",
+        phase: "plan_review",
+        awaiting_plan_ack: true,
+        auto_continue_at: new Date(Date.now() + PLAN_ACK_MS).toISOString(),
+        status_text: "مستني موافقتك على الخطة (هكمّل تلقائي بعد 60 ثانية)",
         last_heartbeat_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
       .eq("id", run.id)
       .select("*")
       .single();
-    await addEvent(supabase, run.id, "Computer session started", "status");
-    return { status: 200, body: { ok: true, run: updated ?? run } };
+    return { status: 200, body: { ok: true, run: pending ?? run } };
   } catch (thrown) {
     const message = thrown instanceof Error ? thrown.message : "Failed to start task";
     await supabase.from("long_runs").update({ status: "error", error: message }).eq("id", run.id);
@@ -338,6 +345,80 @@ export async function startRun(
     return { status: 502, body: { error: message } };
   }
 }
+
+/* ------------------------------------------------------ plan ack / execution */
+
+/** The user pressed Continue (or the 60s timer expired) — start doing the work. */
+export async function beginExecution(
+  supabase: SupabaseClient,
+  run: RunRow,
+  auto = false,
+): Promise<RunRow> {
+  const goal = String(run.goal ?? "");
+  const plan = await planOf(supabase, run.plan_id);
+  const planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
+  const planTools: string[] = Array.isArray(plan?.steps?.tools) ? plan!.steps.tools : [];
+  const memory = memoryBlock(await recallMemory(supabase, run.user_id, goal));
+
+  await supabase
+    .from("long_runs")
+    .update({
+      awaiting_plan_ack: false,
+      auto_continue_at: null,
+      status: "running",
+      phase: "working",
+      status_text: planSteps[0] ?? "بدأت الشغل",
+      last_heartbeat_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", run.id);
+  await addEvent(
+    supabase,
+    run.id,
+    auto ? "كمّلت تلقائيًا بعد انتهاء المهلة" : "تمت الموافقة على الخطة — بدأت التنفيذ",
+    "status",
+  );
+
+  // Independent pre-work the agent asked for in its own plan.
+  if (planTools.includes("web_search")) {
+    const research = await webSearch(supabase, goal);
+    if (research) {
+      await addEvent(supabase, run.id, "بحثت قبل البدء", "tool", research.slice(0, 1200));
+    }
+  }
+
+  const fresh = { ...run, awaiting_plan_ack: false, status: "running", phase: "working" } as RunRow;
+
+  // Coding / integrations / MCP / mixed work runs in the agentic executor.
+  if (String(run.kind ?? "agentic") !== "browser") {
+    return await tickAgentic(supabase, fresh);
+  }
+
+  try {
+    const task = await createTask(
+      supabase,
+      buildInstruction({ goal, memory, plan: planSteps, research: "" }),
+    );
+    await supabase
+      .from("long_runs")
+      .update({
+        status: mapStatus(task.status),
+        external_run_id: task.id,
+        live_view_url: task.liveUrl ?? null,
+        last_heartbeat_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+    await addEvent(supabase, run.id, "Computer session started", "status");
+  } catch (thrown) {
+    const message = thrown instanceof Error ? thrown.message : "Failed to start task";
+    await supabase.from("long_runs").update({ status: "error", error: message }).eq("id", run.id);
+    await addEvent(supabase, run.id, "Failed to start", "error", message);
+  }
+  const { data } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+  return (data as RunRow) ?? fresh;
+}
+
 
 /* --------------------------------------------------------------------- tick */
 
@@ -358,8 +439,21 @@ export async function tickRun(supabase: SupabaseClient, run: RunRow): Promise<Ru
     return { ...run, status: "error", error: "Time budget exhausted" };
   }
 
+  // Waiting for "Continue": auto-proceed once the 60s window is over. This runs
+  // from cron too, so the timer holds even with the tab closed.
+  if (run.awaiting_plan_ack) {
+    const due = Date.parse(run.auto_continue_at ?? new Date(0).toISOString());
+    if (!Number.isFinite(due) || now >= due) return await beginExecution(supabase, run, true);
+    return run;
+  }
+
+  if (String(run.kind ?? "agentic") !== "browser" && run.phase !== "browser_sub") {
+    return await tickAgentic(supabase, run);
+  }
+
   const externalId = typeof run.external_run_id === "string" ? run.external_run_id : "";
   if (!externalId) return run;
+
 
   const task = await getTask(supabase, externalId);
   if (!task) {
@@ -471,17 +565,33 @@ export async function tickRun(supabase: SupabaseClient, run: RunRow): Promise<Ru
   }
 
   // --- provider says finished -> self-critique ----------------------------
-  if (mapped === "done") {
-    await supabase.from("long_runs").update(patch).eq("id", run.id);
-    return await reviewFinished(supabase, { ...run, ...patch }, task);
-  }
-
-  if (mapped === "error") {
+  if (mapped === "done" || mapped === "error") {
+    // A browser sub-task owned by the agentic loop: hand the result back.
+    if (run.phase === "browser_sub") {
+      await supabase
+        .from("long_runs")
+        .update({ ...patch, status: "running", phase: "working", external_run_id: null })
+        .eq("id", run.id);
+      await addEvent(
+        supabase,
+        run.id,
+        "نتيجة مهمة المتصفح",
+        "observation",
+        (task.output || task.error || "no output").slice(0, 4000),
+      );
+      const { data: back } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+      return await tickAgentic(supabase, (back as RunRow) ?? { ...run, ...patch });
+    }
+    if (mapped === "done") {
+      await supabase.from("long_runs").update(patch).eq("id", run.id);
+      return await reviewFinished(supabase, { ...run, ...patch }, task);
+    }
     patch.error = task.error || "Task failed";
     await supabase.from("long_runs").update(patch).eq("id", run.id);
     await finish(supabase, { ...run, ...patch }, "error", String(patch.error));
     return { ...run, ...patch };
   }
+
 
   await supabase.from("long_runs").update(patch).eq("id", run.id);
   if (mapped !== run.status) {
@@ -489,6 +599,257 @@ export async function tickRun(supabase: SupabaseClient, run: RunRow): Promise<Ru
   }
   return { ...run, ...patch };
 }
+
+/* ----------------------------------------------------------- agentic executor */
+
+const AGENTIC_EVENT_TYPES = ["act", "observation", "tool", "review", "answer"];
+
+async function agenticTranscript(supabase: SupabaseClient, runId: string): Promise<string[]> {
+  const { data } = await supabase
+    .from("long_run_events")
+    .select("type,title,detail,created_at")
+    .eq("run_id", runId)
+    .in("type", AGENTIC_EVENT_TYPES)
+    .order("created_at", { ascending: true })
+    .limit(200);
+  return (data ?? []).map((event: any) =>
+    event.detail ? `[${event.type}] ${event.title} :: ${event.detail}` : `[${event.type}] ${event.title}`,
+  );
+}
+
+/**
+ * One bounded slice of the ReAct loop: think, use a tool, record the
+ * observation. Repeats a few times per tick and resumes on the next tick, so a
+ * task can run for hours server-side.
+ */
+export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promise<RunRow> {
+  const deadline = Date.now() + TICK_DEADLINE_MS;
+  const goal = String(run.goal ?? "");
+  const plan = await planOf(supabase, run.plan_id);
+  const planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
+  const memory = memoryBlock(await recallMemory(supabase, run.user_id, goal));
+  let current: RunRow = run;
+  let strikes = Number(run.loop_strikes ?? 0);
+  let stepCount = Number(run.step_count ?? 0);
+
+  for (let i = 0; i < STEPS_PER_TICK && Date.now() < deadline; i += 1) {
+    if (stepCount > MAX_STEPS) {
+      await finish(supabase, current, "error", "Step budget exhausted");
+      return { ...current, status: "error" };
+    }
+
+    const transcript = await agenticTranscript(supabase, current.id);
+    const action: AgentAction | null = await decideNextAction(supabase, {
+      goal,
+      memory,
+      plan: planSteps,
+      transcript,
+      extra:
+        strikes >= 1
+          ? "Your last action produced nothing new. Change your approach — different tool, different input."
+          : null,
+    });
+    if (!action) {
+      await addEvent(supabase, current.id, "مش قدرت أحدد الخطوة الجاية — هجرّب تاني", "log");
+      break;
+    }
+
+    stepCount += 1;
+    await addEvent(
+      supabase,
+      current.id,
+      action.say || action.thought || action.tool,
+      "act",
+      `${action.tool} ${JSON.stringify(action.input).slice(0, 800)}`,
+    );
+    await supabase
+      .from("long_runs")
+      .update({
+        status: "running",
+        phase: "working",
+        step_count: stepCount,
+        status_text: (action.say || action.thought || action.tool).slice(0, 240),
+        last_heartbeat_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", current.id);
+
+    // --- loop detection --------------------------------------------------
+    const print = fingerprint([action.tool, JSON.stringify(action.input)]);
+    strikes = print && print === current.last_fingerprint ? strikes + 1 : 0;
+    await supabase
+      .from("long_runs")
+      .update({ last_fingerprint: print, loop_strikes: strikes })
+      .eq("id", current.id);
+    current = { ...current, last_fingerprint: print, loop_strikes: strikes, step_count: stepCount };
+    await checkpoint(supabase, current, stepCount, print, `${action.tool}`, {
+      tool: action.tool,
+      input: action.input,
+    });
+    if (verdictFor(strikes) === "ask_user") {
+      await addEvent(supabase, current.id, `تكرار متكرر (${strikes}x) — محتاج توجيه`, "loop");
+      await askUser(supabase, { id: current.id, user_id: current.user_id }, {
+        question: `أنا عالق: "${action.tool}" مش بيوصلني لحاجة جديدة. أعمل إيه؟`,
+        reason: "loop",
+        sensitive: false,
+      });
+      await notify(supabase, current, "المهمة محتاجاك", "الوكيل عالق ومحتاج توجيه");
+      const { data } = await supabase.from("long_runs").select("*").eq("id", current.id).single();
+      return (data as RunRow) ?? current;
+    }
+
+    // --- control-flow tools ----------------------------------------------
+    if (action.tool === "ask_user") {
+      await askUser(supabase, { id: current.id, user_id: current.user_id }, {
+        question: String(action.input.question ?? "محتاج معلومة منك لأكمل"),
+        reason: "agent_request",
+        sensitive: Boolean(action.input.sensitive),
+      });
+      await notify(supabase, current, "المهمة محتاجاك", String(action.input.question ?? ""));
+      const { data } = await supabase.from("long_runs").select("*").eq("id", current.id).single();
+      return (data as RunRow) ?? current;
+    }
+
+    if (action.tool === "remember") {
+      await remember(supabase, current.user_id, {
+        kind: "fact",
+        key: String(action.input.key ?? "note").slice(0, 120),
+        value: String(action.input.value ?? "").slice(0, 800),
+        source_run_id: current.id,
+      }).catch(() => null);
+      await addEvent(supabase, current.id, "حفظت المعلومة دي للمستقبل", "observation", String(action.input.key ?? ""));
+      continue;
+    }
+
+    if (action.tool === "browser_task") {
+      try {
+        const task = await createTask(
+          supabase,
+          buildInstruction({
+            goal: String(action.input.task ?? goal),
+            memory,
+            plan: [],
+            research: "",
+            extra: `This is a sub-task of a larger job: ${goal}`,
+          }),
+        );
+        await supabase
+          .from("long_runs")
+          .update({
+            status: mapStatus(task.status),
+            phase: "browser_sub",
+            external_run_id: task.id,
+            live_view_url: task.liveUrl ?? null,
+            status_text: "بشغّل المتصفح للجزء ده",
+            last_heartbeat_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", current.id);
+        await addEvent(supabase, current.id, "سلّمت الجزء ده للمتصفح", "tool", String(action.input.task ?? ""));
+      } catch (error) {
+        await addEvent(
+          supabase,
+          current.id,
+          "المتصفح مش متاح",
+          "observation",
+          error instanceof Error ? error.message : null,
+        );
+        continue;
+      }
+      const { data } = await supabase.from("long_runs").select("*").eq("id", current.id).single();
+      return (data as RunRow) ?? current;
+    }
+
+    if (action.tool === "finish") {
+      return await reviewAgentic(supabase, current, String(action.input.summary ?? ""));
+    }
+
+    // --- real tools -------------------------------------------------------
+    const outcome = await runTool(
+      supabase,
+      { runId: current.id, userId: current.user_id },
+      action,
+    );
+    await addEvent(
+      supabase,
+      current.id,
+      outcome.artifact ? `أنتجت ${outcome.artifact.name}` : `نتيجة ${action.tool}`,
+      "observation",
+      outcome.observation.slice(0, 4000),
+    );
+  }
+
+  const { data } = await supabase.from("long_runs").select("*").eq("id", current.id).single();
+  return (data as RunRow) ?? current;
+}
+
+/** The announced self-review of an agentic run. */
+async function reviewAgentic(
+  supabase: SupabaseClient,
+  run: RunRow,
+  summary: string,
+): Promise<RunRow> {
+  const round = Number(run.review_round ?? 0) + 1;
+  await supabase
+    .from("long_runs")
+    .update({ phase: "reviewing", status_text: REVIEW_TEXT, updated_at: new Date().toISOString() })
+    .eq("id", run.id);
+  await addEvent(supabase, run.id, REVIEW_TEXT, "status", summary || null);
+
+  const plan = await planOf(supabase, run.plan_id);
+  const planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
+  const review = await critique(supabase, {
+    goal: String(run.goal ?? ""),
+    steps: planSteps,
+    successCriteria: plan?.steps?.success_criteria ?? null,
+    trace: await agenticTranscript(supabase, run.id),
+    output: summary || null,
+    round,
+  });
+  await savePlanReview(supabase, String(run.plan_id ?? ""), round, review);
+  await addEvent(supabase, run.id, `مراجعة ذاتية: ${review.verdict}`, "review", review.critique);
+  await supabase.from("long_runs").update({ review_round: round }).eq("id", run.id);
+
+  if (review.verdict === "ask" && review.question) {
+    await askUser(supabase, { id: run.id, user_id: run.user_id }, {
+      question: review.question,
+      reason: "review",
+      sensitive: false,
+    });
+    await notify(supabase, run, "المهمة محتاجاك", review.question);
+    const { data } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+    return (data as RunRow) ?? run;
+  }
+
+  if (review.verdict === "retry" && round <= MAX_REVIEW_ROUNDS) {
+    await addEvent(
+      supabase,
+      run.id,
+      "المراجعة كشفت نقص — برجع أكمّل صح",
+      "answer",
+      [review.critique, review.fix_instruction].filter(Boolean).join("\n"),
+    );
+    await supabase
+      .from("long_runs")
+      .update({
+        status: "running",
+        phase: "working",
+        status_text: "بصلّح اللي ناقص",
+        loop_strikes: 0,
+        last_fingerprint: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+    const { data } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+    return (data as RunRow) ?? { ...run, review_round: round };
+  }
+
+  await finish(supabase, { ...run, review_round: round }, "done", null, summary, review.critique);
+  const { data } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+  return (data as RunRow) ?? run;
+}
+
+
 
 /* --------------------------------------------------------- review / finish */
 
@@ -502,6 +863,15 @@ async function reviewFinished(
   const round = Number(run.review_round ?? 0) + 1;
   const trace = await traceOf(supabase, run.id);
   const output = task.output ?? null;
+
+  // Say it out loud before grading itself.
+  await supabase
+    .from("long_runs")
+    .update({ phase: "reviewing", status_text: REVIEW_TEXT, updated_at: new Date().toISOString() })
+    .eq("id", run.id);
+  await addEvent(supabase, run.id, REVIEW_TEXT, "status", output);
+
+
 
   const review = await critique(supabase, {
     goal: String(run.goal ?? ""),
@@ -693,8 +1063,30 @@ export async function answerRun(
     }).catch(() => null);
   }
 
+  // Agentic runs continue inside their own loop with the answer in the transcript.
+  if (String(run.kind ?? "agentic") !== "browser" && run.phase !== "browser_sub") {
+    await supabase
+      .from("long_runs")
+      .update({
+        status: "running",
+        phase: run.awaiting_plan_ack ? "plan_review" : "working",
+        status_text: "بكمّل بعد ردّك",
+        loop_strikes: 0,
+        last_fingerprint: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+    const { data: resumedRun } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+    const next = (resumedRun as RunRow) ?? run;
+    return next.awaiting_plan_ack
+      ? await beginExecution(supabase, next)
+      : await tickAgentic(supabase, next);
+  }
+
   const externalId = typeof run.external_run_id === "string" ? run.external_run_id : "";
   const followUp = `The user answered your question: ${answer}\nContinue the task from where you stopped.`;
+
+
 
   if (externalId) {
     const resumed = await providerFetch(supabase, `/tasks/${encodeURIComponent(externalId)}`, {
