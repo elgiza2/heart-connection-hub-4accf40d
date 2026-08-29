@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, ListChecks, Pencil, Play } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 /**
  * The plan gate.
@@ -59,14 +60,16 @@ export function AgentPlanCard({
           <div className="flex items-center gap-2">
             <p className="text-[13px] font-medium">دي الخطة اللي هأمشي عليها</p>
             {!editing && (
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 onClick={() => setEditing(true)}
                 className="ms-auto inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
               >
                 <Pencil className="h-3 w-3" />
                 تعديل الخطة
-              </button>
+              </Button>
             )}
           </div>
 
@@ -115,18 +118,21 @@ export function AgentPlanCard({
           )}
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
+            <Button
               type="button"
+              size="sm"
               onClick={() => void go(editing)}
               disabled={busy}
-              className="inline-flex h-9 items-center gap-2 rounded-full bg-[var(--megsy-blue,#3b82f6)] px-4 text-[13px] font-medium text-white transition-opacity disabled:opacity-50"
+              className="rounded-full"
             >
               <Play className="h-3.5 w-3.5" />
               {editing ? "متابعة بالخطة المعدّلة" : `متابعة${left > 0 ? ` (${left})` : ""}`}
-            </button>
+            </Button>
             {editing ? (
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 onClick={() => {
                   setEditing(false);
                   setDraft(steps.join("\n"));
@@ -134,7 +140,7 @@ export function AgentPlanCard({
                 className="h-9 rounded-full px-3 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
               >
                 إلغاء التعديل
-              </button>
+              </Button>
             ) : (
               <span className="text-[11px] text-muted-foreground">
                 {left > 0 ? "هكمّل تلقائي لو مضغطتش" : "بكمّل دلوقتي…"}

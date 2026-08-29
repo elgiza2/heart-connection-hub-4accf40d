@@ -51,6 +51,16 @@ export async function guideLongRun(runId: string, guidance: string) {
   return res.run ?? null;
 }
 
+export async function steerLongRun(runId: string, guidance: string) {
+  const res = await call("steer", { run_id: runId, guidance });
+  return res.run ?? null;
+}
+
+export async function softStopLongRun(runId: string) {
+  const res = await call("soft_stop", { run_id: runId });
+  return res.run ?? null;
+}
+
 export async function answerLongRun(runId: string, answer: string) {
   const res = await call("answer", { run_id: runId, answer });
   return res.run ?? null;
@@ -175,6 +185,21 @@ export function useLongRun(runId: string | null) {
     [runId],
   );
 
+  const steer = useCallback(
+    async (text: string) => {
+      if (!runId || !text.trim()) return;
+      const updated = await steerLongRun(runId, text.trim());
+      if (updated) setRun(updated);
+    },
+    [runId],
+  );
+
+  const softStop = useCallback(async () => {
+    if (!runId) return;
+    const updated = await softStopLongRun(runId);
+    if (updated) setRun(updated);
+  }, [runId]);
+
   const stop = useCallback(async () => {
     if (runId) await stopLongRun(runId);
   }, [runId]);
@@ -189,5 +214,5 @@ export function useLongRun(runId: string | null) {
     [runId],
   );
 
-  return { run, events, question, stop, answer, approvePlan, guide };
+  return { run, events, question, stop, softStop, answer, approvePlan, guide, steer };
 }

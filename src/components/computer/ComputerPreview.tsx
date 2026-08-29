@@ -32,7 +32,7 @@ export function ComputerPreview({
   plan?: string[];
   onClose?: () => void;
 }) {
-  const { run, events, question, stop, answer, approvePlan, guide } = useLongRun(runId);
+  const { run, events, question, stop, softStop, answer, approvePlan, guide, steer } = useLongRun(runId);
   const [control, setControl] = useState(false);
   const [openSteps, setOpenSteps] = useState(true);
   const [full, setFull] = useState(false);
@@ -169,7 +169,7 @@ export function ComputerPreview({
       {planText && !question && (
         <AgentPlanCard
           planText={planText}
-          autoContinueAt={run?.awaiting_plan_ack ? (run.auto_continue_at ?? null) : null}
+          autoContinueAt={run?.awaiting_plan_ack && run.auto_continue_allowed !== false ? (run.auto_continue_at ?? null) : null}
           doneCount={doneCount}
           onContinue={approvePlan}
         />
@@ -328,7 +328,10 @@ export function ComputerPreview({
       {active && !question && !run?.awaiting_plan_ack && (
         <AgentSteerBar
           queued={run?.pending_guidance ?? []}
+          steering={run?.pending_steering ?? []}
           onGuide={guide}
+          onSteer={steer}
+          onSoftStop={softStop}
           onStop={stop}
         />
       )}

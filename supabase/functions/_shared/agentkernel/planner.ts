@@ -16,6 +16,18 @@ export interface Plan {
   kind?: "browser" | "agentic";
 }
 
+export type PlanRisk = "low" | "medium" | "high";
+
+const HIGH_RISK_GOAL = /\b(pay|payment|purchase|buy|checkout|transfer|wire|send (?:an? )?(?:email|message)|publish|post publicly|delete|drop table|remove permanently|cancel subscription|close account|change permissions?|grant access|deploy|production|push)\b|(?:ادفع|دفع|شراء|حوّل|تحويل|احذف|حذف|انشر|إرسال|ارسل|صلاحيات|نشر)/i;
+const MEDIUM_RISK_GOAL = /\b(edit|update|write|create|upload|install|connect|configure|commit)\b|(?:عدّل|تعديل|اكتب|أنشئ|ارفع|ثبّت|اربط|اضبط)/i;
+
+/** Deterministic safety classification; the model cannot downgrade it. */
+export function classifyPlanRisk(goal: string): PlanRisk {
+  if (HIGH_RISK_GOAL.test(goal)) return "high";
+  if (MEDIUM_RISK_GOAL.test(goal)) return "medium";
+  return "low";
+}
+
 export interface Critique {
   verdict: "pass" | "retry" | "ask";
   critique: string;
@@ -41,6 +53,7 @@ export async function makePlan(
   memoryText: string,
 ): Promise<Plan & { clarify: string | null; success_criteria: string | null }> {
   const parsed = await askJson<{
+    kind?: "browser" | "agentic";
     steps?: string[];
     tools?: string[];
     clarify?: string | null;
@@ -71,6 +84,7 @@ export async function makePlan(
     tools,
     clarify,
     success_criteria: parsed?.success_criteria ?? null,
+    kind: parsed?.kind === "browser" ? "browser" : "agentic",
   };
 }
 
