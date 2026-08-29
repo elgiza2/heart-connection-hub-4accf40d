@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
  * The plan gate.
  *
  * The agent writes its plan as a checklist and waits for "Continue". If the user
- * does nothing, a 60s countdown runs out and the agent proceeds on its own (the
- * same deadline is enforced server-side, so it fires with the tab closed too).
+ * does nothing on a reversible low-risk task, a 60s countdown runs out and the
+ * agent proceeds on its own. Sensitive plans never receive an auto deadline.
  * Editing the plan cancels the countdown — an edited plan always needs an
  * explicit Continue.
  */
@@ -141,9 +141,13 @@ export function AgentPlanCard({
               >
                 إلغاء التعديل
               </Button>
-            ) : (
+            ) : autoContinueAt ? (
               <span className="text-[11px] text-muted-foreground">
                 {left > 0 ? "هكمّل تلقائي لو مضغطتش" : "بكمّل دلوقتي…"}
+              </span>
+            ) : (
+              <span className="text-[11px] text-destructive">
+                الإجراء مؤثر ومحتاج موافقتك الصريحة
               </span>
             )}
           </div>
