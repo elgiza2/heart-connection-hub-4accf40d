@@ -40,6 +40,7 @@ import {
   SecurityPage,
   LanguagePage,
   MailPage,
+  PasswordsPage,
   NotificationsPage,
   NotificationsInboxPage,
   UsagePage,
@@ -148,6 +149,7 @@ export const AppRoutes = ({ currentUserId }: { currentUserId: string | null }) =
     <Route path="/settings/security" element={<ProtectedRoute><SecuritySettingsPage /></ProtectedRoute>} />
     <Route path="/settings/language" element={<ProtectedRoute><LanguagePage /></ProtectedRoute>} />
     <Route path="/settings/mail" element={<ProtectedRoute><MailPage /></ProtectedRoute>} />
+    <Route path="/settings/passwords" element={<ProtectedRoute><PasswordsPage /></ProtectedRoute>} />
     <Route path="/settings/mcp" element={<ProtectedRoute><McpSettingsPage /></ProtectedRoute>} />
     <Route path="/mcp-callback" element={<ProtectedRoute><McpCallbackPage /></ProtectedRoute>} />
     <Route path="/settings/memory" element={<ProtectedRoute><KnowledgePage /></ProtectedRoute>} />

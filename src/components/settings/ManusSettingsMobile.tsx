@@ -23,6 +23,7 @@ import {
   Languages,
   Mail as MailIcon,
 } from "lucide-react";
+import { KeyRound } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useConfirm } from "@/components/common/ConfirmDialog";
 import { useActiveAccount } from "@/hooks/useActiveAccount";
@@ -94,6 +95,7 @@ const ManusSettingsMobile = () => {
 
   const mainRows: Row[] = [
     { icon: MailIcon, label: "Mail", trailing: "@megsyai.com", path: "/settings/mail" },
+    { icon: KeyRound, label: "الباسوردات", path: "/settings/passwords" },
     { icon: Lightbulb, label: "Knowledge", path: "/settings/memory" },
     { icon: Bell, label: "Notifications", path: "/notifications" },
     { icon: Database, label: "Data controls", path: "/settings/data" },

@@ -2,10 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Maximize2, Minimize2 } from "lucide-react";
 import { useLongRun } from "@/hooks/useLongRun";
 import { clearActiveComputerRun, setActiveComputerRun } from "@/lib/computer/activeRun";
-import { AgentQuestionCard } from "./AgentQuestionCard";
-import { AgentPlanCard } from "./AgentPlanCard";
 import { AgentToolTrace } from "./AgentToolTrace";
-import { AgentSteerBar } from "./AgentSteerBar";
+
 
 
 function formatElapsed(from?: string | null): string {
@@ -32,11 +30,14 @@ export function ComputerPreview({
   plan?: string[];
   onClose?: () => void;
 }) {
-  const { run, events, question, stop, softStop, answer, approvePlan, guide, steer } = useLongRun(runId);
+  const { run, events, question, stop, softStop, answer, approvePlan, steer } = useLongRun(runId);
   const [control, setControl] = useState(false);
   const [openSteps, setOpenSteps] = useState(true);
   const [full, setFull] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const [reply, setReply] = useState("");
+  const [note, setNote] = useState("");
+  const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
   const summarizedRef = useRef(false);
   const [, force] = useState(0);
 
@@ -44,6 +45,21 @@ export function ComputerPreview({
     const id = window.setInterval(() => force((n) => n + 1), 60_000);
     return () => window.clearInterval(id);
   }, []);
+
+  // live countdown on the auto-continue gate, rendered as plain text
+  const autoAt =
+    run?.awaiting_plan_ack && run.auto_continue_allowed !== false ? run.auto_continue_at : null;
+  useEffect(() => {
+    if (!autoAt) {
+      setSecondsLeft(null);
+      return;
+    }
+    const tick = () =>
+      setSecondsLeft(Math.max(0, Math.ceil((Date.parse(autoAt) - Date.now()) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [autoAt]);
 
   const active = run?.status === "running" || run?.status === "queued" || run?.status === "paused";
   const finished = !!run && !active;
@@ -121,6 +137,10 @@ export function ComputerPreview({
   // The plan checklist stays visible during execution, with live check marks.
   const planText =
     events.find((e) => e.type === "plan")?.detail || (plan ?? []).join("\n") || "";
+  const planLines = planText
+    .split("\n")
+    .map((line) => line.replace(/^\s*\d+[.)]\s*/, "").trim())
+    .filter(Boolean);
   const doneCount = run?.awaiting_plan_ack
     ? 0
     : events.filter((e) => e.type === "step" || e.type === "tool").length;
@@ -162,29 +182,62 @@ export function ComputerPreview({
         </p>
       )}
 
-      {/* the agent stopped and needs a human answer before it can continue */}
-      {question && <AgentQuestionCard question={question} onAnswer={answer} />}
-
-      {/* the plan, with Continue + a 60s auto-continue countdown */}
-      {planText && !question && (
-        <AgentPlanCard
-          planText={planText}
-          autoContinueAt={run?.awaiting_plan_ack && run.auto_continue_allowed !== false ? (run.auto_continue_at ?? null) : null}
-          doneCount={doneCount}
-          onContinue={approvePlan}
-        />
-      )}
-
-      {/* 0 — plan, before any step arrives */}
-      {active && !events.length && (plan?.length ?? 0) > 0 && (
-        <div className="flex flex-col gap-1.5 border-s border-border/40 ps-3">
-          {plan!.map((step, i) => (
-            <div key={i} className="text-[12.5px] leading-relaxed text-muted-foreground">
+      {/* the plan — plain text in the chat, no card */}
+      {planLines.length > 0 && !question && (
+        <div className="flex flex-col gap-1">
+          <p className="text-[13px] font-medium text-foreground">الخطة</p>
+          {planLines.map((step, i) => (
+            <p key={i} className="text-[13px] leading-relaxed text-muted-foreground">
+              {i < doneCount ? "✓ " : "• "}
               {step}
-            </div>
+            </p>
           ))}
+          {run?.awaiting_plan_ack && (
+            <p className="text-[12.5px] text-muted-foreground">
+              <button
+                type="button"
+                onClick={() => void approvePlan()}
+                className="text-primary underline-offset-2 hover:underline"
+              >
+                متابعة
+              </button>
+              {secondsLeft !== null ? ` — هكمّل تلقائيًا بعد ${secondsLeft} ثانية` : " — مستني موافقتك"}
+            </p>
+          )}
         </div>
       )}
+
+      {/* the agent needs a human answer — plain text + one line of input */}
+      {question && (
+        <div className="flex flex-col gap-1.5">
+          <p className="text-[13.5px] leading-relaxed text-foreground">{question.question}</p>
+          {question.reason && (
+            <p className="text-[12.5px] text-muted-foreground">{question.reason}</p>
+          )}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const text = reply.trim();
+              if (!text) return;
+              setReply("");
+              void answer(text);
+            }}
+            className="flex items-center gap-2"
+          >
+            <input
+              value={reply}
+              onChange={(e) => setReply(e.target.value)}
+              type={question.sensitive ? "password" : "text"}
+              placeholder="اكتب ردّك…"
+              className="flex-1 border-0 border-b border-border/60 bg-transparent px-0 py-1 text-[13.5px] outline-none focus:border-primary"
+            />
+            <button type="submit" className="text-[12.5px] text-primary">
+              إرسال
+            </button>
+          </form>
+        </div>
+      )}
+
 
       {/* 1 — computer card: live while running, kept (with the final frame) after */}
       <div
@@ -324,17 +377,44 @@ export function ComputerPreview({
         )}
       </div>
 
-      {/* steering: queue a note or stop, while the agent keeps working */}
+      {/* steering as one line of text: type a note, or stop */}
       {active && !question && !run?.awaiting_plan_ack && (
-        <AgentSteerBar
-          queued={run?.pending_guidance ?? []}
-          steering={run?.pending_steering ?? []}
-          onGuide={guide}
-          onSteer={steer}
-          onSoftStop={softStop}
-          onStop={stop}
-        />
+        <div className="flex flex-col gap-1">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const text = note.trim();
+              if (!text) return;
+              setNote("");
+              void steer(text);
+            }}
+            className="flex items-center gap-2"
+          >
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="وجّهني وأنا شغال…"
+              className="flex-1 border-0 border-b border-border/50 bg-transparent px-0 py-1 text-[13px] outline-none focus:border-primary"
+            />
+            <button type="submit" className="text-[12px] text-primary">
+              إرسال
+            </button>
+            <button
+              type="button"
+              onClick={() => void softStop()}
+              className="text-[12px] text-muted-foreground hover:text-foreground"
+            >
+              وقف بعد الخطوة
+            </button>
+          </form>
+          {(run?.pending_steering ?? []).concat(run?.pending_guidance ?? []).length > 0 && (
+            <p className="text-[11.5px] text-muted-foreground">
+              في الطابور: {(run?.pending_steering ?? []).concat(run?.pending_guidance ?? []).join(" · ")}
+            </p>
+          )}
+        </div>
       )}
+
 
       {/* 2 — final answer, plain text outside the card */}
       {finished && finalText && (
