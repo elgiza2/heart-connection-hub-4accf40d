@@ -1063,8 +1063,30 @@ export async function answerRun(
     }).catch(() => null);
   }
 
+  // Agentic runs continue inside their own loop with the answer in the transcript.
+  if (String(run.kind ?? "agentic") !== "browser" && run.phase !== "browser_sub") {
+    await supabase
+      .from("long_runs")
+      .update({
+        status: "running",
+        phase: run.awaiting_plan_ack ? "plan_review" : "working",
+        status_text: "بكمّل بعد ردّك",
+        loop_strikes: 0,
+        last_fingerprint: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+    const { data: resumedRun } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+    const next = (resumedRun as RunRow) ?? run;
+    return next.awaiting_plan_ack
+      ? await beginExecution(supabase, next)
+      : await tickAgentic(supabase, next);
+  }
+
   const externalId = typeof run.external_run_id === "string" ? run.external_run_id : "";
   const followUp = `The user answered your question: ${answer}\nContinue the task from where you stopped.`;
+
+
 
   if (externalId) {
     const resumed = await providerFetch(supabase, `/tasks/${encodeURIComponent(externalId)}`, {
