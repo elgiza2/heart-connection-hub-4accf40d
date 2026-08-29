@@ -4,6 +4,7 @@ import { useLongRun } from "@/hooks/useLongRun";
 import { clearActiveComputerRun, setActiveComputerRun } from "@/lib/computer/activeRun";
 import { AgentQuestionCard } from "./AgentQuestionCard";
 import { AgentPlanCard } from "./AgentPlanCard";
+import { AgentToolTrace } from "./AgentToolTrace";
 
 
 function formatElapsed(from?: string | null): string {
@@ -92,6 +93,13 @@ export function ComputerPreview({
     rawOutput ||
     (run?.status === "canceled" ? "Task stopped." : null);
 
+  // The plan checklist stays visible during execution, with live check marks.
+  const planText =
+    events.find((e) => e.type === "plan")?.detail || (plan ?? []).join("\n") || "";
+  const doneCount = run?.awaiting_plan_ack
+    ? 0
+    : events.filter((e) => e.type === "step" || e.type === "tool").length;
+
   const lastStep = events.length ? events[events.length - 1] : null;
   const headline = active
     ? run?.status_text || lastStep?.title || "Starting the computer…"
@@ -124,14 +132,11 @@ export function ComputerPreview({
       {question && <AgentQuestionCard question={question} onAnswer={answer} />}
 
       {/* the plan, with Continue + a 60s auto-continue countdown */}
-      {run?.awaiting_plan_ack && !question && (
+      {planText && !question && (
         <AgentPlanCard
-          planText={
-            events.find((e) => e.type === "plan")?.detail ||
-            (plan ?? []).join("\n") ||
-            run.goal
-          }
-          autoContinueAt={run.auto_continue_at ?? null}
+          planText={planText}
+          autoContinueAt={run?.awaiting_plan_ack ? (run.auto_continue_at ?? null) : null}
+          doneCount={doneCount}
           onContinue={approvePlan}
         />
       )}
@@ -264,16 +269,7 @@ export function ComputerPreview({
 
         {openSteps && traceLines.length > 0 && (
           <div className="max-h-72 overflow-y-auto px-3 pb-3">
-            <div className="flex flex-col gap-2 border-s border-border/40 ps-3">
-              {traceLines.map((line, i) => (
-                <div
-                  key={`${i}-${line.slice(0, 24)}`}
-                  className="text-[12.5px] leading-relaxed text-muted-foreground"
-                >
-                  {line}
-                </div>
-              ))}
-            </div>
+            <AgentToolTrace events={events} fallback={plan ?? []} />
           </div>
         )}
 
