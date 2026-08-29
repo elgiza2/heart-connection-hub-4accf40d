@@ -820,7 +820,25 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
       "observation",
       outcome.observation.slice(0, 4000),
     );
+    // Deliverables are collected on the run so the chat can offer them for download.
+    if (outcome.artifact) {
+      const { data: row } = await supabase
+        .from("long_runs")
+        .select("result")
+        .eq("id", current.id)
+        .maybeSingle();
+      const result = ((row as any)?.result ?? {}) as Record<string, unknown>;
+      const files = Array.isArray(result.files)
+        ? (result.files as { name?: string; url: string }[])
+        : [];
+      if (!files.some((f) => f.url === outcome.artifact!.url)) files.push(outcome.artifact);
+      await supabase
+        .from("long_runs")
+        .update({ result: { ...result, files }, updated_at: new Date().toISOString() })
+        .eq("id", current.id);
+    }
   }
+
 
   const { data } = await supabase.from("long_runs").select("*").eq("id", current.id).single();
   return (data as RunRow) ?? current;
@@ -992,13 +1010,27 @@ async function finish(
   reviewNote?: string | null,
 ): Promise<void> {
   const now = new Date().toISOString();
+  // Keep any artifacts produced during the run attached to the final result.
+  const { data: latest } = await supabase
+    .from("long_runs")
+    .select("result")
+    .eq("id", run.id)
+    .maybeSingle();
+  const previous = (((latest as any)?.result ?? run.result) ?? {}) as Record<string, unknown>;
+  const files = Array.isArray(previous.files) ? previous.files : [];
   await supabase
     .from("long_runs")
     .update({
       status,
       phase: "finished",
       review_round: run.review_round ?? 0,
-      result: status === "done" ? { output: output ?? null, review: reviewNote ?? null } : run.result ?? null,
+      result:
+        status === "done"
+          ? { output: output ?? null, review: reviewNote ?? null, files }
+          : files.length
+            ? { ...previous, files }
+            : run.result ?? null,
+
       error,
       status_text: status === "done" ? "Task completed" : "Task failed",
       expires_at: now,
