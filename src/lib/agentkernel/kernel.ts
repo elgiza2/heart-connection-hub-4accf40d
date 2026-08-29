@@ -133,20 +133,32 @@ function riskFloor(goal: string): "low" | "high" {
 
 /* ------------------------------------------------------------------ executing */
 
-const EXEC_SYSTEM = `You are an autonomous agent executing a task in the user's browser.
+const EXEC_SYSTEM = `You are an autonomous agent executing a task end to end, like a senior human operator.
 Pick exactly ONE next action and reply with JSON only:
-{"thought":"one short sentence","tool":"run_code|fetch_url|write_file|read_file|remember|ask_user|finish","args":{...}}
+{"thought":"one short sentence","tool":"run_code|fetch_url|login_identity|check_mail|write_file|read_file|remember|ask_user|finish","args":{...}}
 Args by tool:
 - run_code: {"code":"async JS; console.log results"}
 - fetch_url: {"url":"https://..."}
+- login_identity: {"site":"example.com","url":"https://example.com/signup"}
+  -> returns the user's own Megsy email plus a clean strong password, already saved
+     in Settings > Passwords. ALWAYS use this to sign up or sign in to any site.
+- check_mail: {"query":"verification"} -> reads the newest messages in that Megsy
+  mailbox, so you can pull confirmation links and verification codes yourself.
 - write_file: {"path":"report.md","content":"..."}
 - read_file: {"path":"report.md"}
 - remember: {"content":"durable fact about the user or the task"}
 - ask_user: {"question":"...","reason":"...","sensitive":true|false}
 - finish: {"summary":"what you delivered, in the user's language"}
-Rules: never guess past a CAPTCHA, login, payment or missing credential — use ask_user.
-Deliver real artifacts with write_file when the task produces a document or code.
-Call finish only when the task is genuinely complete.`;
+
+How you behave:
+- NEVER ask the user for an email or a password: call login_identity and use it.
+- When something blocks you (error page, dead selector, rate limit, missing data),
+  do NOT stop the task. Think it through in "thought": name the obstacle, then take a
+  DIFFERENT action towards the same goal — another URL, another source, another method.
+- Only ask_user for things no software can do for you: a CAPTCHA you cannot pass, a
+  2FA code that never lands in the mailbox, a payment, or an irreversible action.
+- Deliver real artifacts with write_file when the task produces a document or code.
+- Call finish only when the task is genuinely complete, with evidence in the log.`;
 
 interface Action {
   thought?: string;
@@ -158,17 +170,54 @@ async function nextAction(run: RunRow, memory: string): Promise<Action | null> {
   const plan: string[] = Array.isArray(run.result?.plan) ? run.result.plan : [];
   const transcript: string[] = Array.isArray(run.result?.transcript) ? run.result.transcript : [];
   const guidance = [...(run.pending_steering ?? []), ...(run.pending_guidance ?? [])];
+  const directive: string | null = run.result?.supervisor ?? null;
   const context = [
     memory,
     `Task: ${run.goal}`,
     plan.length ? `Plan:\n- ${plan.join("\n- ")}` : "",
+    directive ? `Supervisor directive (follow it):\n${directive}` : "",
     guidance.length ? `New instructions from the user:\n- ${guidance.join("\n- ")}` : "",
-    transcript.length ? `Progress so far:\n${transcript.slice(-14).join("\n")}` : "",
+    transcript.length ? `Progress so far:\n${transcript.slice(-16).join("\n")}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
   return askJson<Action>(EXEC_SYSTEM, [{ role: "user", content: context }]);
 }
+
+/* ----------------------------------------------------------------- supervisor */
+
+const SUPERVISOR_SYSTEM = `You are the supervising agent of a worker agent running a long task.
+You never execute anything yourself; you keep the worker moving for hours without stalling.
+Read the task and the recent log, then reply with JSON only:
+{"keep_going":true|false,"directive":"one or two concrete sentences telling the worker exactly what to do next, in the user's language"}
+keep_going=false ONLY when the task is verifiably complete or a human decision is truly required.
+If the worker is repeating itself, stuck on an obstacle, or drifting, order a concrete different approach.`;
+
+/** Asks the supervisor for a directive; injected into the worker's next prompt. */
+async function superviseRun(run: RunRow): Promise<{ keep_going: boolean; directive: string } | null> {
+  const transcript: string[] = Array.isArray(run.result?.transcript) ? run.result.transcript : [];
+  const parsed = await askJson<{ keep_going?: boolean; directive?: unknown }>(SUPERVISOR_SYSTEM, [
+    {
+      role: "user",
+      content: [
+        `Task: ${run.goal}`,
+        `Steps so far: ${run.step_count ?? 0}`,
+        `Recent log:\n${transcript.slice(-20).join("\n") || "(nothing yet)"}`,
+      ].join("\n\n"),
+    },
+  ]);
+  if (!parsed) return null;
+  const directive = String(parsed.directive ?? "").slice(0, 500);
+  return { keep_going: parsed.keep_going !== false, directive };
+}
+
+/** Blockers a human really has to handle — everything else the agent solves itself. */
+function needsHuman(text: string): boolean {
+  return /(captcha|كابتشا|recaptcha|2fa|two-factor|otp|كود التحقق|verification code|payment|credit card|بطاقة|ادفع|الدفع|refund|delete account|حذف الحساب)/i.test(
+    text,
+  );
+}
+
 
 /* -------------------------------------------------------------------- public */
 
