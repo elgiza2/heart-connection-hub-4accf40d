@@ -117,6 +117,9 @@ export function ComputerPreview({
 
   return (
     <div className="flex flex-col gap-3">
+      {/* the agent stopped and needs a human answer before it can continue */}
+      {question && <AgentQuestionCard question={question} onAnswer={answer} />}
+
       {/* 0 — plan, before any step arrives */}
       {active && !events.length && (plan?.length ?? 0) > 0 && (
         <div className="flex flex-col gap-1.5 border-s border-border/40 ps-3">
