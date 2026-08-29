@@ -58,6 +58,30 @@ export function ComputerPreview({
     if (finished) setFull(false);
   }, [finished]);
 
+  // The run keeps going server-side, so tell the user when it lands or blocks —
+  // even if the tab was in the background the whole time.
+  const notifiedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const state = finished ? "finished" : question ? "needs_input" : null;
+    if (!state || notifiedRef.current === state) return;
+    notifiedRef.current = state;
+    if (!("Notification" in window) || !document.hidden) return;
+    const show = () => {
+      try {
+        new Notification(
+          state === "needs_input" ? "الوكيل محتاج ردّك" : failed ? "المهمة فشلت" : "المهمة خلصت",
+          { body: run?.goal?.slice(0, 120) || "" },
+        );
+      } catch {
+        /* notifications blocked — the in-chat card is enough */
+      }
+    };
+    if (Notification.permission === "granted") show();
+    else if (Notification.permission === "default") void Notification.requestPermission().then((p) => {
+      if (p === "granted") show();
+    });
+  }, [finished, question, failed, run?.goal]);
+
   const url = useMemo(() => {
     if (!run?.live_view_url || finished) return null;
     return control ? run.live_view_url : `${run.live_view_url}?view_only=true`;
@@ -129,6 +153,15 @@ export function ComputerPreview({
 
   return (
     <div className="flex flex-col gap-3">
+      {/* the work continues server-side even with the tab closed */}
+      {active && !question && (
+        <p className="text-[11.5px] text-muted-foreground">
+          شغال في الخلفية — تقدر تسيب الصفحة وهكمّل، وهبلّغك لما أخلّص.
+          {typeof run?.step_count === "number" ? ` · ${run.step_count} خطوة` : ""}
+          {` · ${formatElapsed(run?.created_at)}`}
+        </p>
+      )}
+
       {/* the agent stopped and needs a human answer before it can continue */}
       {question && <AgentQuestionCard question={question} onAnswer={answer} />}
 
