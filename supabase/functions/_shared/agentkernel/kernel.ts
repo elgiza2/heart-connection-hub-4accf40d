@@ -1010,13 +1010,27 @@ async function finish(
   reviewNote?: string | null,
 ): Promise<void> {
   const now = new Date().toISOString();
+  // Keep any artifacts produced during the run attached to the final result.
+  const { data: latest } = await supabase
+    .from("long_runs")
+    .select("result")
+    .eq("id", run.id)
+    .maybeSingle();
+  const previous = (((latest as any)?.result ?? run.result) ?? {}) as Record<string, unknown>;
+  const files = Array.isArray(previous.files) ? previous.files : [];
   await supabase
     .from("long_runs")
     .update({
       status,
       phase: "finished",
       review_round: run.review_round ?? 0,
-      result: status === "done" ? { output: output ?? null, review: reviewNote ?? null } : run.result ?? null,
+      result:
+        status === "done"
+          ? { output: output ?? null, review: reviewNote ?? null, files }
+          : files.length
+            ? { ...previous, files }
+            : run.result ?? null,
+
       error,
       status_text: status === "done" ? "Task completed" : "Task failed",
       expires_at: now,
