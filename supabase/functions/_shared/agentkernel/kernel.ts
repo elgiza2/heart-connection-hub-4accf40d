@@ -565,17 +565,33 @@ export async function tickRun(supabase: SupabaseClient, run: RunRow): Promise<Ru
   }
 
   // --- provider says finished -> self-critique ----------------------------
-  if (mapped === "done") {
-    await supabase.from("long_runs").update(patch).eq("id", run.id);
-    return await reviewFinished(supabase, { ...run, ...patch }, task);
-  }
-
-  if (mapped === "error") {
+  if (mapped === "done" || mapped === "error") {
+    // A browser sub-task owned by the agentic loop: hand the result back.
+    if (run.phase === "browser_sub") {
+      await supabase
+        .from("long_runs")
+        .update({ ...patch, status: "running", phase: "working", external_run_id: null })
+        .eq("id", run.id);
+      await addEvent(
+        supabase,
+        run.id,
+        "نتيجة مهمة المتصفح",
+        "observation",
+        (task.output || task.error || "no output").slice(0, 4000),
+      );
+      const { data: back } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+      return await tickAgentic(supabase, (back as RunRow) ?? { ...run, ...patch });
+    }
+    if (mapped === "done") {
+      await supabase.from("long_runs").update(patch).eq("id", run.id);
+      return await reviewFinished(supabase, { ...run, ...patch }, task);
+    }
     patch.error = task.error || "Task failed";
     await supabase.from("long_runs").update(patch).eq("id", run.id);
     await finish(supabase, { ...run, ...patch }, "error", String(patch.error));
     return { ...run, ...patch };
   }
+
 
   await supabase.from("long_runs").update(patch).eq("id", run.id);
   if (mapped !== run.status) {
