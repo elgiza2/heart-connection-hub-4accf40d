@@ -1,59 +1,61 @@
-# Making the agent behave like a human operator
+# تطوير الوكيل ليشتغل زي إنسان حقيقي
 
-## What exists today (after reviewing the code)
+## الوضع الحالي (بعد فحص الكود)
 
-- Three separate agent systems, none unified:
-  - **Computer Agent** (`src/lib/manus/agentCore.ts`) — thin proxy to an upstream provider: create / poll / stop. Has a single conversation summary in `computer_memory`.
-  - **Long Run** (`src/lib/longrun/core.ts` + `supabase/functions/long-run`) — proxy to a cloud browser provider, streams steps into `long_run_events` over Supabase realtime. Sandbox lease 15 min, kept alive **by the open browser tab**.
-  - **Dev Agent** (`src/lib/devagent/agentLoop.ts`) — the only real in-house loop (Router → Planner → Coder → Verifier), advanced in 50s slices, driven by **client polling**.
-- Missing everywhere: durable cross-task memory, pause-and-ask, self-critique, loop detection, server-side continuation, parallel tools.
+عندك ٣ أنظمة وكيل منفصلة، مفيش طبقة موحدة بينهم:
 
-## What will be built
+- **Computer Agent** (`src/lib/manus/agentCore.ts`) — مجرد وسيط للمزود الخارجي: create / poll / stop. الذاكرة الوحيدة سطر ملخص في جدول `computer_memory`.
+- **Long Run** (`src/lib/longrun/core.ts` + `supabase/functions/long-run`) — وسيط لمزود براوزر سحابي، بيبث الخطوات في `long_run_events` عبر realtime. مدة الـsandbox ١٥ دقيقة، و**التاب المفتوح** هو اللي بيمدّها.
+- **Dev Agent** (`src/lib/devagent/agentLoop.ts`) — اللوب الحقيقي الوحيد (Router → Planner → Coder → Verifier)، بيتقدّم في شرائح ٥٠ ثانية، و**العميل هو اللي بيسوقه** بالـpolling.
 
-A shared orchestration layer (`src/lib/agentkernel/`) used by Long Run and the Computer Agent, plus the DB and UI pieces around it.
+الناقص في الكل: ذاكرة دائمة بين المهام، وقفة وسؤال، مراجعة ذاتية، كشف التكرار، استكمال من السيرفر، وأدوات متعددة.
 
-### 1. Real memory
-New tables: `agent_memory` (facts scoped by user + optional `domain`, e.g. `booking.com` → "asks for OTP", `payment` → "prefers Vodafone Cash"), with `kind` (`site_fact` | `user_pref` | `credential_hint` | `failure_lesson`), `confidence`, `hits`, `last_used_at`.
-- **Before** each run: relevant memories are selected by goal keywords + detected domains and injected into the prompt as a "What you already know" block.
-- **After** each run (and on every pause/failure): a summarizer extracts new durable facts and upserts them, deduped by `(user_id, domain, key)`.
+## اللي هيتم بناؤه
 
-### 2. Stop and ask
-- New `agent_questions` table (`run_id`, `question`, `options`, `answer`, `status`, `asked_at`, `answered_at`).
-- The run enters `status = 'needs_input'` and stops burning provider time. Triggers: CAPTCHA / OTP / login wall detected, money above a per-user threshold, destructive action (delete, send, publish), or the model itself calling an `ask_user` tool.
-- Chat UI renders an inline question card (quick-reply chips + free text). Answering writes the answer, resumes the run, and the answer is also stored as memory so the same question isn't asked twice.
+طبقة تنسيق مشتركة (`src/lib/agentkernel/`) يستخدمها Long Run و Computer Agent، مع الجداول والواجهة المرتبطة بها.
 
-### 3. Plan → execute → self-critique
-- Phase `planning`: the model writes a numbered plan (stored in `agent_plans`, shown live in the UI) before any browser action.
-- Phase `verifying`: after execution, the last screenshot + goal + plan go back to the model with a strict rubric ("was every step actually done? evidence?"). Verdict `pass` / `retry` / `ask`. `retry` re-enters execution with the critique appended (max 3 review rounds), `ask` goes to #2.
+### ١. ذاكرة حقيقية
+جدول جديد `agent_memory`: حقائق مربوطة بالمستخدم و`domain` اختياري (مثال: `booking.com` → "بيطلب OTP"، `payment` → "بيفضل فودافون كاش")، مع `kind` (`site_fact` | `user_pref` | `credential_hint` | `failure_lesson`) و`confidence` و`hits` و`last_used_at`.
+- **قبل** كل مهمة: تُختار الذكريات المناسبة من كلمات الهدف والدومينات المكتشفة وتُحقن في البرومبت كقسم "اللي انت عارفه بالفعل".
+- **بعد** كل مهمة (وعند كل وقفة أو فشل): ملخِّص يستخرج الحقائق الدائمة الجديدة ويعملها upsert مع منع التكرار على `(user_id, domain, key)`.
 
-### 4. No repeated mistakes
-- `agentkernel/loopGuard.ts` fingerprints each step (action + target + URL + screenshot hash). 2 identical fingerprints ⇒ inject a "change strategy" directive; 3 ⇒ escalate strategy (keyboard instead of click, direct URL instead of navigation, search instead of menu); 4 ⇒ pause and ask the user.
-- Every escalation is written to memory as a `failure_lesson` so future runs skip the dead end.
+### ٢. يقف ويسأل
+- جدول `agent_questions` (`run_id`, `question`, `options`, `answer`, `status`, `asked_at`, `answered_at`).
+- المهمة تدخل حالة `needs_input` وتوقف استهلاك وقت المزود. المحفّزات: CAPTCHA / OTP / صفحة تسجيل دخول، مبلغ أكبر من حد يحدده المستخدم، إجراء مدمّر (حذف، إرسال، نشر)، أو الموديل نفسه ينادي أداة `ask_user`.
+- الشات يعرض كارت سؤال داخلي (أزرار ردود سريعة + كتابة حرة). الإجابة تُسجَّل، المهمة تكمل، والإجابة تتخزن كذاكرة عشان السؤال ميتكررش تاني.
 
-### 5. Runs continue with the tab closed
-- Server-side driver: a new public route `api/public/agent-tick` (with the cron auth helper) plus a Supabase `pg_cron` schedule every minute. It picks up runs whose heartbeat is stale, extends the sandbox lease, syncs provider state, and advances slices — no browser required.
-- The client keeps its realtime subscription for live view, but is no longer load-bearing.
-- On finish / failure / question: a notification row (existing notifications system) + optional web push, so the user gets pinged.
+### ٣. يخطط ثم ينفذ ثم يراجع نفسه
+- مرحلة `planning`: الموديل يكتب خطة مرقّمة (تُخزَّن في `agent_plans` وتظهر مباشرة في الواجهة) قبل أي حركة في البراوزر.
+- مرحلة `verifying`: بعد التنفيذ، آخر screenshot + الهدف + الخطة ترجع للموديل بمعيار صارم ("كل خطوة اتعملت فعلاً؟ فين الدليل؟"). الحكم `pass` / `retry` / `ask`. `retry` يرجع للتنفيذ مع النقد مضاف (أقصى ٣ دورات مراجعة)، و`ask` يروح للبند ٢.
 
-### 6. Multiple tools in one task
-- Tool registry in `agentkernel/tools.ts` exposing `browser`, `web_search`, `write_file`, `read_file`, `run_code`, `ask_user`, `remember`. The model may return an **array** of tool calls; independent ones run with `Promise.all`, dependent ones sequentially, and each result is fed back into the loop. Tool choice is the model's, not the user's.
+### ٤. ما يكرّرش الغلط
+- `agentkernel/loopGuard.ts` يعمل بصمة لكل خطوة (الإجراء + العنصر + الرابط + هاش الـscreenshot). بصمتين متطابقتين ⇒ توجيه "غيّر الطريقة"؛ ٣ ⇒ تصعيد استراتيجية (كيبورد بدل الكليك، رابط مباشر بدل التنقل، بحث بدل القوائم)؛ ٤ ⇒ وقفة وسؤال للمستخدم.
+- كل تصعيد يُكتب في الذاكرة كـ`failure_lesson` عشان المهام الجاية تتجنب الطريق المسدود.
 
-### 7. Two-hour-plus tasks
-- Slice-based execution with checkpointing after every step, so any slice can die and be resumed.
-- Lease auto-renewal from the server tick; `MAX_RUN_MS` raised to a configurable ceiling (default 6h) with a per-run budget in steps and provider minutes.
-- Resume-after-provider-timeout: if the sandbox is reaped, a fresh sandbox is booted and the run continues from the checkpoint + memory instead of starting over.
+### ٥. يكمل والتاب مقفول
+- سائق من جهة السيرفر: راوت عام جديد `api/public/agent-tick` (مع helper مصادقة الكرون) + جدولة `pg_cron` كل دقيقة. بياخد المهام اللي نبضها متأخر، يمدّ مدة الـsandbox، يزامن حالة المزود، ويقدّم الشرائح — بدون براوزر.
+- العميل يفضل مشترك في realtime للعرض المباشر بس مش مسؤول عن استمرار المهمة.
+- عند الانتهاء / الفشل / السؤال: إشعار في نظام الإشعارات الموجود + web push اختياري.
 
-## Technical notes
+### ٦. أدوات متعددة في نفس المهمة
+- سجل أدوات في `agentkernel/tools.ts` فيه `browser` و`web_search` و`write_file` و`read_file` و`run_code` و`ask_user` و`remember`. الموديل يقدر يرجّع **مصفوفة** استدعاءات؛ المستقلة تتنفذ بـ`Promise.all` والمترابطة بالتتابع، ونتيجة كل واحدة ترجع للوب. اختيار الأداة قرار الموديل مش المستخدم.
 
-- One migration adds `agent_memory`, `agent_questions`, `agent_plans`, `agent_checkpoints`, plus columns on `long_runs` (`plan_id`, `review_round`, `budget_ms`, `needs_input`, `loop_strikes`). Every new public table gets explicit GRANTs and owner-only RLS via `auth.uid()`.
-- Kernel code is server-only (`src/lib/agentkernel/*`), reused by both the Vercel `api/*` functions and the Supabase edge functions so dev and prod behave the same.
-- Existing chat surfaces (`useLongRun`, `ServiceProgress`, `runDevTurn`) are extended, not replaced — no visual redesign.
-- Verified end-to-end with the demo account you gave.
+### ٧. مهام ساعتين أو أكثر
+- تنفيذ بالشرائح مع checkpoint بعد كل خطوة، فأي شريحة تقع تُستكمل.
+- تمديد تلقائي للـlease من تِك السيرفر، ورفع `MAX_RUN_MS` لسقف قابل للضبط (٦ ساعات افتراضيًا) مع ميزانية لكل مهمة بالخطوات ودقائق المزود.
+- استكمال بعد انتهاء مهلة المزود: لو الـsandbox اتلغى، يتم تشغيل sandbox جديد والمهمة تكمل من الـcheckpoint + الذاكرة بدل ما تبدأ من الأول.
 
-## Suggested order
+## ملاحظات تقنية
 
-1. Migration + memory read/write wired into Long Run (points 1, 4-lessons).
-2. Pause-and-ask + inline question card (point 2).
-3. Plan + self-critique phases and the loop guard (points 3, 4).
-4. Server tick, cron, notifications, long-budget resume (points 5, 7).
-5. Multi-tool registry (point 6).
+- مايجريشن واحد يضيف `agent_memory` و`agent_questions` و`agent_plans` و`agent_checkpoints`، وأعمدة على `long_runs` (`plan_id`, `review_round`, `budget_ms`, `needs_input`, `loop_strikes`). كل جدول جديد بيأخد GRANTs صريحة وRLS ملك المستخدم عبر `auth.uid()`.
+- كود الـkernel سيرفر-only (`src/lib/agentkernel/*`) ومُعاد استخدامه في دوال `api/*` وفي supabase edge functions عشان الديف والبرودكشن يتصرفوا نفس الشكل.
+- واجهات الشات الحالية (`useLongRun`, `ServiceProgress`, `runDevTurn`) هتتوسّع مش تتغير — مفيش إعادة تصميم بصري.
+- الاختبار من البداية للنهاية بالحساب التجريبي اللي بعتّه.
+
+## ترتيب التنفيذ المقترح
+
+1. المايجريشن + ربط الذاكرة قراءة/كتابة في Long Run (بند ١ و درس الفشل من ٤).
+2. الوقفة والسؤال + كارت السؤال في الشات (بند ٢).
+3. مرحلتي الخطة والمراجعة الذاتية + حارس التكرار (بند ٣ و ٤).
+4. تِك السيرفر والكرون والإشعارات واستكمال المهام الطويلة (بند ٥ و ٧).
+5. سجل الأدوات المتعددة (بند ٦).
