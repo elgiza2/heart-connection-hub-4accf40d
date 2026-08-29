@@ -115,6 +115,47 @@ export type Database = {
         }
         Relationships: []
       }
+      agent_checkpoints: {
+        Row: {
+          created_at: string
+          fingerprint: string | null
+          id: string
+          last_action: string | null
+          run_id: string
+          state: Json
+          step_number: number
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          fingerprint?: string | null
+          id?: string
+          last_action?: string | null
+          run_id: string
+          state?: Json
+          step_number?: number
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          fingerprint?: string | null
+          id?: string
+          last_action?: string | null
+          run_id?: string
+          state?: Json
+          step_number?: number
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_checkpoints_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "long_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       agent_evals: {
         Row: {
           created_at: string
@@ -232,6 +273,51 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      agent_memory: {
+        Row: {
+          confidence: number
+          created_at: string
+          domain: string | null
+          hits: number
+          id: string
+          key: string
+          kind: string
+          last_used_at: string | null
+          source_run_id: string | null
+          updated_at: string
+          user_id: string
+          value: string
+        }
+        Insert: {
+          confidence?: number
+          created_at?: string
+          domain?: string | null
+          hits?: number
+          id?: string
+          key: string
+          kind?: string
+          last_used_at?: string | null
+          source_run_id?: string | null
+          updated_at?: string
+          user_id: string
+          value: string
+        }
+        Update: {
+          confidence?: number
+          created_at?: string
+          domain?: string | null
+          hits?: number
+          id?: string
+          key?: string
+          kind?: string
+          last_used_at?: string | null
+          source_run_id?: string | null
+          updated_at?: string
+          user_id?: string
+          value?: string
+        }
+        Relationships: []
       }
       agent_memory_files: {
         Row: {
@@ -354,6 +440,53 @@ export type Database = {
           },
         ]
       }
+      agent_plans: {
+        Row: {
+          created_at: string
+          critique: string | null
+          goal: string
+          id: string
+          review_round: number
+          run_id: string
+          steps: Json
+          updated_at: string
+          user_id: string
+          verdict: string | null
+        }
+        Insert: {
+          created_at?: string
+          critique?: string | null
+          goal: string
+          id?: string
+          review_round?: number
+          run_id: string
+          steps?: Json
+          updated_at?: string
+          user_id: string
+          verdict?: string | null
+        }
+        Update: {
+          created_at?: string
+          critique?: string | null
+          goal?: string
+          id?: string
+          review_round?: number
+          run_id?: string
+          steps?: Json
+          updated_at?: string
+          user_id?: string
+          verdict?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_plans_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "long_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       agent_proposals: {
         Row: {
           agent_id: string | null
@@ -416,6 +549,62 @@ export type Database = {
             columns: ["run_id"]
             isOneToOne: false
             referencedRelation: "agent_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      agent_questions: {
+        Row: {
+          answer: string | null
+          answered_at: string | null
+          asked_at: string
+          created_at: string
+          id: string
+          options: Json
+          question: string
+          reason: string | null
+          run_id: string
+          sensitive: boolean
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          answer?: string | null
+          answered_at?: string | null
+          asked_at?: string
+          created_at?: string
+          id?: string
+          options?: Json
+          question: string
+          reason?: string | null
+          run_id: string
+          sensitive?: boolean
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          answer?: string | null
+          answered_at?: string | null
+          asked_at?: string
+          created_at?: string
+          id?: string
+          options?: Json
+          question?: string
+          reason?: string | null
+          run_id?: string
+          sensitive?: boolean
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_questions_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "long_runs"
             referencedColumns: ["id"]
           },
         ]
@@ -6183,6 +6372,7 @@ export type Database = {
       }
       long_runs: {
         Row: {
+          budget_ms: number
           conversation_id: string | null
           created_at: string
           error: string | null
@@ -6191,19 +6381,28 @@ export type Database = {
           goal: string
           id: string
           kind: string
+          last_fingerprint: string | null
           last_heartbeat_at: string
           live_view_url: string | null
+          loop_strikes: number
+          needs_input: boolean
+          notified_at: string | null
           phase: string | null
+          plan_id: string | null
           provider: string | null
           provider_key_id: string | null
           result: Json | null
+          review_round: number
+          sandbox_generation: number
           sandbox_id: string | null
           status: string
           status_text: string | null
+          step_count: number
           updated_at: string
           user_id: string
         }
         Insert: {
+          budget_ms?: number
           conversation_id?: string | null
           created_at?: string
           error?: string | null
@@ -6212,19 +6411,28 @@ export type Database = {
           goal?: string
           id?: string
           kind?: string
+          last_fingerprint?: string | null
           last_heartbeat_at?: string
           live_view_url?: string | null
+          loop_strikes?: number
+          needs_input?: boolean
+          notified_at?: string | null
           phase?: string | null
+          plan_id?: string | null
           provider?: string | null
           provider_key_id?: string | null
           result?: Json | null
+          review_round?: number
+          sandbox_generation?: number
           sandbox_id?: string | null
           status?: string
           status_text?: string | null
+          step_count?: number
           updated_at?: string
           user_id: string
         }
         Update: {
+          budget_ms?: number
           conversation_id?: string | null
           created_at?: string
           error?: string | null
@@ -6233,15 +6441,23 @@ export type Database = {
           goal?: string
           id?: string
           kind?: string
+          last_fingerprint?: string | null
           last_heartbeat_at?: string
           live_view_url?: string | null
+          loop_strikes?: number
+          needs_input?: boolean
+          notified_at?: string | null
           phase?: string | null
+          plan_id?: string | null
           provider?: string | null
           provider_key_id?: string | null
           result?: Json | null
+          review_round?: number
+          sandbox_generation?: number
           sandbox_id?: string | null
           status?: string
           status_text?: string | null
+          step_count?: number
           updated_at?: string
           user_id?: string
         }
