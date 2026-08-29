@@ -10,6 +10,8 @@
  */
 import { supabase } from "@/integrations/supabase/client";
 import type { LongRun } from "@/lib/longrun/types";
+import { loginIdentityFor } from "./credentials";
+import { listMail } from "@/lib/mail/mailClient";
 import { askJson, askModel } from "./llm";
 import {
   fetchUrl,
@@ -19,6 +21,7 @@ import {
   writeFile,
   type ToolContext,
 } from "./tools";
+
 
 const AUTO_CONTINUE_MS = 60_000;
 const MAX_ACTIONS_PER_TICK = 6;
