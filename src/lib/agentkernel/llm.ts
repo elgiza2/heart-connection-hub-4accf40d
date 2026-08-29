@@ -4,7 +4,8 @@
  * The agent kernel normally runs inside the `long-run` edge function. When that
  * function is unavailable (deploy channel down, 404, 500) the kernel falls back
  * to running in the tab, and it still uses the SAME model endpoint the main chat
- * uses — the already-deployed `n` function — so no new deploy is needed.
+ * uses — the already-deployed `chat-alibaba` function — so no new deploy is
+ * needed. Verified live: `chat-alibaba` streams SSE `choices[].delta.content`.
  */
 import { supabase } from "@/integrations/supabase/client";
 import { DEFAULT_MODEL } from "@/lib/defaultModel";
@@ -14,7 +15,8 @@ export interface LlmMessage {
   content: string;
 }
 
-const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/n`;
+const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat-alibaba`;
+
 
 /** One completion from the chat model. Returns "" when the call fails. */
 export async function askModel(
