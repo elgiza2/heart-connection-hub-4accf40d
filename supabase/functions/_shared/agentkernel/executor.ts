@@ -304,7 +304,12 @@ export async function runTool(
     }
 
     case "read_file": {
-      const text = await readFile(supabase, String(input.path ?? ""));
+      const path = String(input.path ?? "");
+      const ownedPrefix = `agent-runs/${ctx.runId}/`;
+      if (!path.startsWith(ownedPrefix)) {
+        return { observation: "رفضت قراءة ملف خارج مساحة هذه المهمة" };
+      }
+      const text = await readFile(supabase, path);
       return { observation: text ? text.slice(0, 6000) : "file not found or empty" };
     }
 

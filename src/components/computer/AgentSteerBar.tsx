@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CornerDownLeft, ListEnd, Send, ShieldStop, Square } from "lucide-react";
+import { CornerDownLeft, ListEnd, Send, ShieldOff, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -97,7 +97,7 @@ export function AgentSteerBar({
           onClick={() => void onSoftStop()}
           title="يتوقف عند أقرب نقطة آمنة ويحفظ التقدم"
         >
-          <ShieldStop className="h-3 w-3" />
+          <ShieldOff className="h-3 w-3" />
           إيقاف آمن
         </Button>
         <Button type="button" variant="ghost" size="icon-sm" onClick={() => void onStop()} title="إيقاف فوري" className="text-muted-foreground hover:text-destructive">

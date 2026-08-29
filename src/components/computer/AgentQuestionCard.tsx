@@ -46,15 +46,17 @@ export function AgentQuestionCard({
           {question.options.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-2">
               {question.options.map((option) => (
-                <button
+                <Button
                   key={option}
                   type="button"
+                  variant="outline"
+                  size="sm"
                   disabled={busy}
                   onClick={() => void send(option)}
-                  className="rounded-full border border-border/60 px-3 py-1 text-[12px] transition-colors hover:bg-muted/60 disabled:opacity-50"
+                  className="rounded-full"
                 >
                   {option}
-                </button>
+                </Button>
               ))}
             </div>
           )}
@@ -79,14 +81,15 @@ export function AgentQuestionCard({
               placeholder="Your answer…"
               className="h-9 flex-1 rounded-full border border-border/60 bg-background px-3 text-[13px] outline-none focus:border-[var(--megsy-blue,#3b82f6)]"
             />
-            <button
+            <Button
               type="submit"
+              size="icon-sm"
               disabled={busy || !text.trim()}
               aria-label="Send answer"
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--megsy-blue,#3b82f6)] text-white transition-opacity disabled:opacity-40"
+              className="shrink-0 rounded-full"
             >
               <Send className="h-4 w-4" />
-            </button>
+            </Button>
           </form>}
         </div>
       </div>

@@ -29,6 +29,21 @@ const TICK_DEADLINE_MS = 50_000;
 /** Announced out loud before the agent grades its own work. */
 const REVIEW_TEXT = "دلوقتي بأراجع اللي عملته";
 
+function redactToolInput(tool: string, input: Record<string, unknown>): string {
+  if (tool === "mcp_call") {
+    return JSON.stringify({
+      server: String(input.server ?? "").slice(0, 100),
+      tool: String(input.tool ?? "").slice(0, 100),
+      arguments: "[redacted]",
+    });
+  }
+  if (tool === "write_file") {
+    return JSON.stringify({ name: String(input.name ?? "artifact.txt").slice(0, 180), content: "[redacted]" });
+  }
+  if (tool === "run_code") return JSON.stringify({ code: "[redacted]" });
+  return JSON.stringify(input).slice(0, 800);
+}
+
 
 export type RunRow = Record<string, any> & {
   id: string;
@@ -703,9 +718,10 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
   for (let i = 0; i < STEPS_PER_TICK && Date.now() < deadline; i += 1) {
     const { data: control } = await supabase
       .from("long_runs")
-      .select("stop_requested")
+      .select("stop_requested,status")
       .eq("id", current.id)
       .maybeSingle();
+    if (control?.status === "canceled") return { ...current, status: "canceled" };
     if (control?.stop_requested) return await tickRun(supabase, { ...current, stop_requested: true });
     if (stepCount > MAX_STEPS) {
       await finish(supabase, current, "error", "Step budget exhausted");
@@ -740,13 +756,26 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
       break;
     }
 
+    const actionDescription = `${action.tool} ${JSON.stringify(action.input)}`;
+    const guardedTool = action.tool === "mcp_call" || action.tool === "write_file";
+    const actionBlock = guardedTool
+      ? detectBlock(actionDescription) ?? detectLargeAmount(actionDescription)
+      : null;
+    if (actionBlock) {
+      await askUser(supabase, { id: current.id, user_id: current.user_id }, actionBlock);
+      await addEvent(supabase, current.id, "وقفت قبل إجراء مؤثر وبستنى موافقتك", "approval", actionBlock.reason);
+      await notify(supabase, current, "المهمة محتاجة موافقتك", actionBlock.question);
+      const { data } = await supabase.from("long_runs").select("*").eq("id", current.id).single();
+      return (data as RunRow) ?? current;
+    }
+
     stepCount += 1;
     await addEvent(
       supabase,
       current.id,
       action.say || action.thought || action.tool,
       "act",
-      `${action.tool} ${JSON.stringify(action.input).slice(0, 800)}`,
+      `${action.tool} ${redactToolInput(action.tool, action.input)}`,
     );
     await supabase
       .from("long_runs")
@@ -770,7 +799,7 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
     current = { ...current, last_fingerprint: print, loop_strikes: strikes, step_count: stepCount };
     await checkpoint(supabase, current, stepCount, print, `${action.tool}`, {
       tool: action.tool,
-      input: action.input,
+      input: guardedTool ? { redacted: true } : action.input,
     });
     if (verdictFor(strikes) === "ask_user") {
       await addEvent(supabase, current.id, `تكرار متكرر (${strikes}x) — محتاج توجيه`, "loop");
