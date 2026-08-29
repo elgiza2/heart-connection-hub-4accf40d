@@ -632,6 +632,24 @@ async function agenticTranscript(supabase: SupabaseClient, runId: string): Promi
   );
 }
 
+/** Pops the user's queued steering notes (if any) and logs them in the trace. */
+async function drainGuidance(supabase: SupabaseClient, run: RunRow): Promise<string> {
+  const { data } = await supabase
+    .from("long_runs")
+    .select("pending_guidance")
+    .eq("id", run.id)
+    .maybeSingle();
+  const queued: string[] = Array.isArray((data as any)?.pending_guidance)
+    ? ((data as any).pending_guidance as string[])
+    : [];
+  if (!queued.length) return "";
+  await supabase.from("long_runs").update({ pending_guidance: [] }).eq("id", run.id);
+  const text = queued.join("\n");
+  await addEvent(supabase, run.id, "استلمت توجيه منك وهمشي عليه", "log", text.slice(0, 800));
+  return text;
+}
+
+
 /**
  * One bounded slice of the ReAct loop: think, use a tool, record the
  * observation. Repeats a few times per tick and resumes on the next tick, so a
@@ -653,6 +671,10 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
       return { ...current, status: "error" };
     }
 
+    // Mid-run steering: whatever the user queued while we were working gets
+    // folded into the very next decision, then cleared.
+    const guidance = await drainGuidance(supabase, current);
+
     const transcript = await agenticTranscript(supabase, current.id);
     const action: AgentAction | null = await decideNextAction(supabase, {
       goal,
@@ -660,10 +682,16 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
       plan: planSteps,
       transcript,
       extra:
-        strikes >= 1
-          ? "Your last action produced nothing new. Change your approach — different tool, different input."
-          : null,
+        [
+          guidance ? `The user just steered you mid-run: ${guidance}\nFollow it now.` : null,
+          strikes >= 1
+            ? "Your last action produced nothing new. Change your approach — different tool, different input."
+            : null,
+        ]
+          .filter(Boolean)
+          .join("\n") || null,
     });
+
     if (!action) {
       await addEvent(supabase, current.id, "مش قدرت أحدد الخطوة الجاية — هجرّب تاني", "log");
       break;

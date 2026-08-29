@@ -5,6 +5,7 @@ import { clearActiveComputerRun, setActiveComputerRun } from "@/lib/computer/act
 import { AgentQuestionCard } from "./AgentQuestionCard";
 import { AgentPlanCard } from "./AgentPlanCard";
 import { AgentToolTrace } from "./AgentToolTrace";
+import { AgentSteerBar } from "./AgentSteerBar";
 
 
 function formatElapsed(from?: string | null): string {
@@ -31,7 +32,7 @@ export function ComputerPreview({
   plan?: string[];
   onClose?: () => void;
 }) {
-  const { run, events, question, stop, answer, approvePlan } = useLongRun(runId);
+  const { run, events, question, stop, answer, approvePlan, guide } = useLongRun(runId);
   const [control, setControl] = useState(false);
   const [openSteps, setOpenSteps] = useState(true);
   const [full, setFull] = useState(false);
@@ -56,6 +57,30 @@ export function ComputerPreview({
   useEffect(() => {
     if (finished) setFull(false);
   }, [finished]);
+
+  // The run keeps going server-side, so tell the user when it lands or blocks —
+  // even if the tab was in the background the whole time.
+  const notifiedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const state = finished ? "finished" : question ? "needs_input" : null;
+    if (!state || notifiedRef.current === state) return;
+    notifiedRef.current = state;
+    if (!("Notification" in window) || !document.hidden) return;
+    const show = () => {
+      try {
+        new Notification(
+          state === "needs_input" ? "الوكيل محتاج ردّك" : failed ? "المهمة فشلت" : "المهمة خلصت",
+          { body: run?.goal?.slice(0, 120) || "" },
+        );
+      } catch {
+        /* notifications blocked — the in-chat card is enough */
+      }
+    };
+    if (Notification.permission === "granted") show();
+    else if (Notification.permission === "default") void Notification.requestPermission().then((p) => {
+      if (p === "granted") show();
+    });
+  }, [finished, question, failed, run?.goal]);
 
   const url = useMemo(() => {
     if (!run?.live_view_url || finished) return null;
@@ -128,6 +153,15 @@ export function ComputerPreview({
 
   return (
     <div className="flex flex-col gap-3">
+      {/* the work continues server-side even with the tab closed */}
+      {active && !question && (
+        <p className="text-[11.5px] text-muted-foreground">
+          شغال في الخلفية — تقدر تسيب الصفحة وهكمّل، وهبلّغك لما أخلّص.
+          {typeof run?.step_count === "number" ? ` · ${run.step_count} خطوة` : ""}
+          {` · ${formatElapsed(run?.created_at)}`}
+        </p>
+      )}
+
       {/* the agent stopped and needs a human answer before it can continue */}
       {question && <AgentQuestionCard question={question} onAnswer={answer} />}
 
@@ -289,6 +323,15 @@ export function ComputerPreview({
           </div>
         )}
       </div>
+
+      {/* steering: queue a note or stop, while the agent keeps working */}
+      {active && !question && !run?.awaiting_plan_ack && (
+        <AgentSteerBar
+          queued={run?.pending_guidance ?? []}
+          onGuide={guide}
+          onStop={stop}
+        />
+      )}
 
       {/* 2 — final answer, plain text outside the card */}
       {finished && finalText && (

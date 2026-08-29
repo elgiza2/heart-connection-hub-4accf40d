@@ -46,6 +46,11 @@ export async function approveLongRunPlan(runId: string, planSteps?: string[]) {
   return res.run ?? null;
 }
 
+export async function guideLongRun(runId: string, guidance: string) {
+  const res = await call("guide", { run_id: runId, guidance });
+  return res.run ?? null;
+}
+
 export async function answerLongRun(runId: string, answer: string) {
   const res = await call("answer", { run_id: runId, answer });
   return res.run ?? null;
@@ -161,6 +166,15 @@ export function useLongRun(runId: string | null) {
     [runId],
   );
 
+  const guide = useCallback(
+    async (text: string) => {
+      if (!runId || !text.trim()) return;
+      const updated = await guideLongRun(runId, text.trim());
+      if (updated) setRun(updated);
+    },
+    [runId],
+  );
+
   const stop = useCallback(async () => {
     if (runId) await stopLongRun(runId);
   }, [runId]);
@@ -175,5 +189,5 @@ export function useLongRun(runId: string | null) {
     [runId],
   );
 
-  return { run, events, question, stop, answer, approvePlan };
+  return { run, events, question, stop, answer, approvePlan, guide };
 }
