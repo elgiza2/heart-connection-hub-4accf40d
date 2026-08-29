@@ -712,7 +712,7 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
 
     if (action.tool === "remember") {
       await remember(supabase, current.user_id, {
-        kind: "fact",
+        kind: "user_fact",
         key: String(action.input.key ?? "note").slice(0, 120),
         value: String(action.input.value ?? "").slice(0, 800),
         source_run_id: current.id,

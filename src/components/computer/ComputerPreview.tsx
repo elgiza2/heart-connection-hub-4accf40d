@@ -3,6 +3,7 @@ import { Check, ChevronDown, Maximize2, Minimize2 } from "lucide-react";
 import { useLongRun } from "@/hooks/useLongRun";
 import { clearActiveComputerRun, setActiveComputerRun } from "@/lib/computer/activeRun";
 import { AgentQuestionCard } from "./AgentQuestionCard";
+import { AgentPlanCard } from "./AgentPlanCard";
 
 
 function formatElapsed(from?: string | null): string {
@@ -29,7 +30,7 @@ export function ComputerPreview({
   plan?: string[];
   onClose?: () => void;
 }) {
-  const { run, events, question, stop, answer } = useLongRun(runId);
+  const { run, events, question, stop, answer, approvePlan } = useLongRun(runId);
   const [control, setControl] = useState(false);
   const [openSteps, setOpenSteps] = useState(true);
   const [full, setFull] = useState(false);
@@ -121,6 +122,19 @@ export function ComputerPreview({
     <div className="flex flex-col gap-3">
       {/* the agent stopped and needs a human answer before it can continue */}
       {question && <AgentQuestionCard question={question} onAnswer={answer} />}
+
+      {/* the plan, with Continue + a 60s auto-continue countdown */}
+      {run?.awaiting_plan_ack && !question && (
+        <AgentPlanCard
+          planText={
+            events.find((e) => e.type === "plan")?.detail ||
+            (plan ?? []).join("\n") ||
+            run.goal
+          }
+          autoContinueAt={run.auto_continue_at ?? null}
+          onContinue={approvePlan}
+        />
+      )}
 
       {/* 0 — plan, before any step arrives */}
       {active && !events.length && (plan?.length ?? 0) > 0 && (
