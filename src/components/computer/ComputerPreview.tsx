@@ -5,6 +5,7 @@ import { clearActiveComputerRun, setActiveComputerRun } from "@/lib/computer/act
 import { AgentQuestionCard } from "./AgentQuestionCard";
 import { AgentPlanCard } from "./AgentPlanCard";
 import { AgentToolTrace } from "./AgentToolTrace";
+import { AgentSteerBar } from "./AgentSteerBar";
 
 
 function formatElapsed(from?: string | null): string {
@@ -31,7 +32,7 @@ export function ComputerPreview({
   plan?: string[];
   onClose?: () => void;
 }) {
-  const { run, events, question, stop, answer, approvePlan } = useLongRun(runId);
+  const { run, events, question, stop, answer, approvePlan, guide } = useLongRun(runId);
   const [control, setControl] = useState(false);
   const [openSteps, setOpenSteps] = useState(true);
   const [full, setFull] = useState(false);
@@ -289,6 +290,15 @@ export function ComputerPreview({
           </div>
         )}
       </div>
+
+      {/* steering: queue a note or stop, while the agent keeps working */}
+      {active && !question && !run?.awaiting_plan_ack && (
+        <AgentSteerBar
+          queued={run?.pending_guidance ?? []}
+          onGuide={guide}
+          onStop={stop}
+        />
+      )}
 
       {/* 2 — final answer, plain text outside the card */}
       {finished && finalText && (
