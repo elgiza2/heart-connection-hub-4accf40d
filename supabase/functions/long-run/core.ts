@@ -29,6 +29,8 @@ export interface LongRunPayload {
   budget_ms?: number;
   conversation_id?: string | null;
   run_id?: string;
+  plan_steps?: string[];
+
 }
 
 function db() {
