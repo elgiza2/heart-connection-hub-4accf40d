@@ -160,29 +160,62 @@ export function ComputerPreview({
         </p>
       )}
 
-      {/* the agent stopped and needs a human answer before it can continue */}
-      {question && <AgentQuestionCard question={question} onAnswer={answer} />}
-
-      {/* the plan, with Continue + a 60s auto-continue countdown */}
-      {planText && !question && (
-        <AgentPlanCard
-          planText={planText}
-          autoContinueAt={run?.awaiting_plan_ack && run.auto_continue_allowed !== false ? (run.auto_continue_at ?? null) : null}
-          doneCount={doneCount}
-          onContinue={approvePlan}
-        />
-      )}
-
-      {/* 0 — plan, before any step arrives */}
-      {active && !events.length && (plan?.length ?? 0) > 0 && (
-        <div className="flex flex-col gap-1.5 border-s border-border/40 ps-3">
-          {plan!.map((step, i) => (
-            <div key={i} className="text-[12.5px] leading-relaxed text-muted-foreground">
+      {/* the plan — plain text in the chat, no card */}
+      {planLines.length > 0 && !question && (
+        <div className="flex flex-col gap-1">
+          <p className="text-[13px] font-medium text-foreground">الخطة</p>
+          {planLines.map((step, i) => (
+            <p key={i} className="text-[13px] leading-relaxed text-muted-foreground">
+              {i < doneCount ? "✓ " : "• "}
               {step}
-            </div>
+            </p>
           ))}
+          {run?.awaiting_plan_ack && (
+            <p className="text-[12.5px] text-muted-foreground">
+              <button
+                type="button"
+                onClick={() => void approvePlan()}
+                className="text-primary underline-offset-2 hover:underline"
+              >
+                متابعة
+              </button>
+              {secondsLeft !== null ? ` — هكمّل تلقائيًا بعد ${secondsLeft} ثانية` : " — مستني موافقتك"}
+            </p>
+          )}
         </div>
       )}
+
+      {/* the agent needs a human answer — plain text + one line of input */}
+      {question && (
+        <div className="flex flex-col gap-1.5">
+          <p className="text-[13.5px] leading-relaxed text-foreground">{question.question}</p>
+          {question.reason && (
+            <p className="text-[12.5px] text-muted-foreground">{question.reason}</p>
+          )}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const text = reply.trim();
+              if (!text) return;
+              setReply("");
+              void answer(text);
+            }}
+            className="flex items-center gap-2"
+          >
+            <input
+              value={reply}
+              onChange={(e) => setReply(e.target.value)}
+              type={question.sensitive ? "password" : "text"}
+              placeholder="اكتب ردّك…"
+              className="flex-1 border-0 border-b border-border/60 bg-transparent px-0 py-1 text-[13.5px] outline-none focus:border-primary"
+            />
+            <button type="submit" className="text-[12.5px] text-primary">
+              إرسال
+            </button>
+          </form>
+        </div>
+      )}
+
 
       {/* 1 — computer card: live while running, kept (with the final frame) after */}
       <div
