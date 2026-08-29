@@ -21,7 +21,11 @@ const MAX_REVIEW_ROUNDS = 3;
 const DEFAULT_BUDGET_MS = 6 * 60 * 60 * 1000;
 const MAX_STEPS = 600;
 
-export type RunRow = Record<string, any>;
+export type RunRow = Record<string, any> & {
+  id: string;
+  user_id: string;
+  goal: string;
+};
 
 /* ------------------------------------------------------------------ provider */
 
