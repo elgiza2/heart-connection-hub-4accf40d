@@ -31,7 +31,7 @@ const MAX_REVIEW_ROUNDS = 3;
 const DEFAULT_BUDGET_MS = 6 * 60 * 60 * 1000;
 
 /** Tools whose arguments must never be echoed into the public trace. */
-const REDACTED_TOOLS = new Set(["remember"]);
+const REDACTED_TOOLS = new Set(["remember", "login_identity"]);
 
 const ticking = new Set<string>();
 const fileCache = new Map<string, ToolContext>();
@@ -638,8 +638,12 @@ async function finish(
     },
   ]);
 
-  if (verdict?.done === false && round <= MAX_REVIEW_ROUNDS) {
-    const gap = String(verdict.gap ?? "فيه حاجة ناقصة");
+  // The supervisor gets the last word: a premature finish is sent back to work.
+  const supervisor = round <= MAX_REVIEW_ROUNDS ? await superviseRun(run) : null;
+  const supervisorBlocks = supervisor?.keep_going === true && !!supervisor.directive;
+
+  if ((verdict?.done === false || supervisorBlocks) && round <= MAX_REVIEW_ROUNDS) {
+    const gap = String(verdict?.gap ?? supervisor?.directive ?? "فيه حاجة ناقصة");
     await event(runId, "step", "المراجعة لقت نقص — بكمّل", gap);
     return patch(runId, {
       status: "running",
@@ -648,6 +652,7 @@ async function finish(
       review_round: round,
       result: {
         ...(run.result ?? {}),
+        supervisor: supervisor?.directive ?? null,
         transcript: [...transcript, `SELF-REVIEW: not done yet — ${gap}`],
         files: filesToArtifacts(ctx),
       },
