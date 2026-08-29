@@ -719,6 +719,30 @@ export type Database = {
         }
         Relationships: []
       }
+      agent_tick_config: {
+        Row: {
+          created_at: string
+          functions_url: string
+          id: boolean
+          secret: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          functions_url: string
+          id?: boolean
+          secret?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          functions_url?: string
+          id?: boolean
+          secret?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       agent_tool_bindings: {
         Row: {
           agent_slug: string
@@ -16189,6 +16213,7 @@ export type Database = {
         }
         Returns: Json
       }
+      run_agent_tick: { Args: never; Returns: undefined }
       search_attachment_chunks: {
         Args: {
           p_conversation_id: string
