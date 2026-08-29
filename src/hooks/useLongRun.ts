@@ -38,8 +38,11 @@ export async function stopLongRun(runId: string) {
   await call("stop", { run_id: runId });
 }
 
-export async function approveLongRunPlan(runId: string) {
-  const res = await call("approve_plan", { run_id: runId });
+export async function approveLongRunPlan(runId: string, planSteps?: string[]) {
+  const res = await call("approve_plan", {
+    run_id: runId,
+    ...(planSteps && planSteps.length ? { plan_steps: planSteps } : {}),
+  });
   return res.run ?? null;
 }
 
@@ -149,11 +152,14 @@ export function useLongRun(runId: string | null) {
     return () => window.clearInterval(id);
   }, [runId, run?.status, run?.needs_input]);
 
-  const approvePlan = useCallback(async () => {
-    if (!runId) return;
-    const updated = await approveLongRunPlan(runId);
-    if (updated) setRun(updated);
-  }, [runId]);
+  const approvePlan = useCallback(
+    async (planSteps?: string[]) => {
+      if (!runId) return;
+      const updated = await approveLongRunPlan(runId, planSteps);
+      if (updated) setRun(updated);
+    },
+    [runId],
+  );
 
   const stop = useCallback(async () => {
     if (runId) await stopLongRun(runId);
