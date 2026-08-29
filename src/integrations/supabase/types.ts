@@ -6396,6 +6396,7 @@ export type Database = {
       }
       long_runs: {
         Row: {
+          auto_continue_allowed: boolean
           auto_continue_at: string | null
           awaiting_plan_ack: boolean
           budget_ms: number
@@ -6414,21 +6415,25 @@ export type Database = {
           needs_input: boolean
           notified_at: string | null
           pending_guidance: string[]
+          pending_steering: string[]
           phase: string | null
           plan_id: string | null
           provider: string | null
           provider_key_id: string | null
           result: Json | null
           review_round: number
+          risk_level: string
           sandbox_generation: number
           sandbox_id: string | null
           status: string
           status_text: string | null
           step_count: number
+          stop_requested: boolean
           updated_at: string
           user_id: string
         }
         Insert: {
+          auto_continue_allowed?: boolean
           auto_continue_at?: string | null
           awaiting_plan_ack?: boolean
           budget_ms?: number
@@ -6447,21 +6452,25 @@ export type Database = {
           needs_input?: boolean
           notified_at?: string | null
           pending_guidance?: string[]
+          pending_steering?: string[]
           phase?: string | null
           plan_id?: string | null
           provider?: string | null
           provider_key_id?: string | null
           result?: Json | null
           review_round?: number
+          risk_level?: string
           sandbox_generation?: number
           sandbox_id?: string | null
           status?: string
           status_text?: string | null
           step_count?: number
+          stop_requested?: boolean
           updated_at?: string
           user_id: string
         }
         Update: {
+          auto_continue_allowed?: boolean
           auto_continue_at?: string | null
           awaiting_plan_ack?: boolean
           budget_ms?: number
@@ -6480,17 +6489,20 @@ export type Database = {
           needs_input?: boolean
           notified_at?: string | null
           pending_guidance?: string[]
+          pending_steering?: string[]
           phase?: string | null
           plan_id?: string | null
           provider?: string | null
           provider_key_id?: string | null
           result?: Json | null
           review_round?: number
+          risk_level?: string
           sandbox_generation?: number
           sandbox_id?: string | null
           status?: string
           status_text?: string | null
           step_count?: number
+          stop_requested?: boolean
           updated_at?: string
           user_id?: string
         }
