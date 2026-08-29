@@ -6396,6 +6396,8 @@ export type Database = {
       }
       long_runs: {
         Row: {
+          auto_continue_at: string | null
+          awaiting_plan_ack: boolean
           budget_ms: number
           conversation_id: string | null
           created_at: string
@@ -6426,6 +6428,8 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          auto_continue_at?: string | null
+          awaiting_plan_ack?: boolean
           budget_ms?: number
           conversation_id?: string | null
           created_at?: string
@@ -6456,6 +6460,8 @@ export type Database = {
           user_id: string
         }
         Update: {
+          auto_continue_at?: string | null
+          awaiting_plan_ack?: boolean
           budget_ms?: number
           conversation_id?: string | null
           created_at?: string
