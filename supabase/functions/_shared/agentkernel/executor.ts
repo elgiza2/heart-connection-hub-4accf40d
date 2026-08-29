@@ -239,16 +239,17 @@ export async function callMcpTool(
       .map((part) => part?.text ?? "")
       .filter(Boolean)
       .join("\n");
-    await supabase
-      .from("mcp_call_log")
-      .insert({
+    try {
+      await supabase.from("mcp_call_log").insert({
         connection_id: target.id,
         user_id: userId,
         tool_name: args.tool,
         arguments: args.arguments ?? {},
         status: parsed.result?.isError ? "error" : "ok",
-      })
-      .catch?.(() => null);
+      });
+    } catch {
+      /* logging is best-effort */
+    }
     return (content || payload).slice(0, 6000);
   } catch (error) {
     return `MCP call failed: ${error instanceof Error ? error.message : String(error)}`;
