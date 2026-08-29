@@ -15,11 +15,20 @@ import { fingerprint, loopInstruction, verdictFor } from "./loopGuard.ts";
 import { askUser, detectBlock, detectLargeAmount, openQuestion, resolveQuestion } from "./questions.ts";
 import { critique, makePlan, savePlanReview } from "./planner.ts";
 import { webSearch } from "./tools.ts";
+import { type AgentAction, decideNextAction, runTool } from "./executor.ts";
 
 const BU_BASE = Deno.env.get("BROWSER_USE_API_BASE") || "https://api.browser-use.com/api/v2";
 const MAX_REVIEW_ROUNDS = 3;
 const DEFAULT_BUDGET_MS = 6 * 60 * 60 * 1000;
 const MAX_STEPS = 600;
+/** How long the user gets to press "Continue" before the agent proceeds itself. */
+const PLAN_ACK_MS = 60_000;
+/** Tool calls executed per tick, and the wall-clock ceiling for one tick. */
+const STEPS_PER_TICK = 6;
+const TICK_DEADLINE_MS = 50_000;
+/** Announced out loud before the agent grades its own work. */
+const REVIEW_TEXT = "دلوقتي بأراجع اللي عملته";
+
 
 export type RunRow = Record<string, any> & {
   id: string;
