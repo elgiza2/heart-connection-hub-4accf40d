@@ -44,7 +44,12 @@ export async function handleLongRun(payload: LongRunPayload | null, tickSecret?:
   const supabase = db();
 
   if (payload?.action === "cron_tick") {
-    const expected = Deno.env.get("AGENT_TICK_SECRET");
+    const { data: tickConfig } = await supabase
+      .from("agent_tick_config")
+      .select("secret")
+      .eq("id", true)
+      .maybeSingle();
+    const expected = (tickConfig as { secret?: string } | null)?.secret;
     if (!expected || tickSecret !== expected) {
       return { status: 403, body: { error: "Forbidden" } };
     }
