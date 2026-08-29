@@ -13,6 +13,7 @@ export interface Plan {
   steps: string[];
   clarify?: string | null;
   tools?: string[];
+  kind?: "browser" | "agentic";
 }
 
 export interface Critique {
@@ -23,12 +24,15 @@ export interface Critique {
 }
 
 const PLAN_SYSTEM = [
-  "You plan a real browser-automation task before it runs, like a careful human assistant.",
-  'Return JSON only: {"steps":["..."],"tools":["browser","web_search","write_file"],"clarify":"question or null","success_criteria":"one sentence"}',
+  "You plan a real task for a fully autonomous agent before it runs, like a careful human assistant.",
+  'Return JSON only: {"kind":"browser|agentic","steps":["..."],"tools":["browser","web_search","run_code","mcp_call","write_file"],"clarify":"question or null","success_criteria":"one sentence"}',
+  '"kind":"browser" ONLY when the whole job is operating a website UI (login, forms, clicking, scraping a UI).',
+  '"kind":"agentic" for everything else: coding, data work, file/document production, API and MCP integrations, or mixed jobs — the agent can still hand a browser sub-task to the browser from there.',
   "3-8 steps, each a concrete observable action. Use the provided memories: never re-discover something already known.",
   'Set "clarify" ONLY when the goal cannot be attempted at all without an answer (missing target, missing account, ambiguous amount).',
   'List every tool the task genuinely needs in "tools" — you decide, not the user.',
 ].join("\n");
+
 
 /** Creates and persists the plan for a run. */
 export async function makePlan(
