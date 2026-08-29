@@ -22,6 +22,7 @@ export interface LongRunPayload {
     | "stop"
     | "answer"
     | "approve_plan"
+    | "guide"
     | "cron_tick";
   token?: string;
   goal?: string;
@@ -30,6 +31,7 @@ export interface LongRunPayload {
   conversation_id?: string | null;
   run_id?: string;
   plan_steps?: string[];
+  guidance?: string;
 
 }
 
@@ -106,6 +108,23 @@ export async function handleLongRun(payload: LongRunPayload | null, tickSecret?:
       body: { ok: true, run: await beginExecution(supabase, run, false, steps) },
     };
 
+  }
+
+  if (payload?.action === "guide") {
+    const run = await loadOwnedRun(supabase, user.id, payload.run_id);
+    if (!run) return { status: 404, body: { error: "Unknown run" } };
+    const note = (payload.guidance ?? "").trim().slice(0, 2000);
+    if (!note) return { status: 400, body: { error: "Empty guidance" } };
+    const queued: string[] = Array.isArray((run as { pending_guidance?: string[] }).pending_guidance)
+      ? (run as { pending_guidance: string[] }).pending_guidance
+      : [];
+    const { data: updated } = await supabase
+      .from("long_runs")
+      .update({ pending_guidance: [...queued, note].slice(-10) })
+      .eq("id", run.id)
+      .select("*")
+      .single();
+    return { status: 200, body: { ok: true, run: updated ?? run } };
   }
 
   if (payload?.action === "answer") {
