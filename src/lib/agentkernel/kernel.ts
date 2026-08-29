@@ -431,7 +431,39 @@ export async function tick(runId: string): Promise<RunRow | null> {
 
       if (tool === "ask_user") {
         const question = String(args.question ?? "محتاج توضيح");
-        const sensitive = !!args.sensitive;
+        const reason = args.reason ? String(args.reason) : "";
+        const selfSolveTries = Number(run.result?.self_solve ?? 0);
+
+        // A human is only pulled in for things software genuinely cannot do.
+        // Everything else becomes an internal "think it through" step, so the
+        // task keeps moving instead of dying on the first obstacle.
+        if (!needsHuman(`${question} ${reason}`) && selfSolveTries < 3) {
+          await event(
+            runId,
+            "step",
+            "ظهرت مشكلة — بفكر في طريقة تانية",
+            `${question}${reason ? `\n${reason}` : ""}`,
+          );
+          run =
+            (await patch(runId, {
+              status: "running",
+              phase: "executing",
+              status_text: "ظهرت مشكلة — بجرب طريقة تانية",
+              pending_guidance: [],
+              pending_steering: [],
+              result: {
+                ...(run.result ?? {}),
+                self_solve: selfSolveTries + 1,
+                transcript: [
+                  ...transcript,
+                  `OBSTACLE: ${question}. Do not ask the user — solve it yourself with a different method or source.`,
+                ].slice(-60),
+              },
+            })) ?? run;
+          continue;
+        }
+
+        const sensitive = !!args.sensitive || needsHuman(question);
         await supabase.from("agent_questions").insert({
           run_id: runId,
           user_id: userId,
@@ -466,6 +498,38 @@ export async function tick(runId: string): Promise<RunRow | null> {
         const res = await fetchUrl(String(args.url ?? ""));
         ok = res.ok;
         output = res.output;
+      } else if (tool === "login_identity") {
+        try {
+          const id = await loginIdentityFor(String(args.site ?? args.url ?? ""), {
+            url: args.url ? String(args.url) : null,
+            notes: run.goal ?? null,
+          });
+          output = `use email ${id.email} and password ${id.password} on ${id.site} (${
+            id.reused ? "existing account" : "new account, saved in Settings > Passwords"
+          })`;
+        } catch (error) {
+          ok = false;
+          output = error instanceof Error ? error.message : "login identity failed";
+        }
+      } else if (tool === "check_mail") {
+        try {
+          const q = String(args.query ?? "").toLowerCase();
+          const mail = await listMail("inbox", 20);
+          const hits = q
+            ? mail.filter(
+                (m) =>
+                  m.subject.toLowerCase().includes(q) || m.body_text.toLowerCase().includes(q),
+              )
+            : mail;
+          output =
+            hits
+              .slice(0, 5)
+              .map((m) => `From ${m.from_address} — ${m.subject}\n${m.body_text.slice(0, 800)}`)
+              .join("\n---\n") || "مفيش رسايل مطابقة في البريد";
+        } catch (error) {
+          ok = false;
+          output = error instanceof Error ? error.message : "mail read failed";
+        }
       } else if (tool === "write_file") {
         const res = writeFile(ctx, String(args.path ?? ""), String(args.content ?? ""));
         ok = res.ok;
@@ -483,29 +547,61 @@ export async function tick(runId: string): Promise<RunRow | null> {
         output = `أداة غير معروفة: ${tool}`;
       }
 
-      const detail = REDACTED_TOOLS.has(tool) ? "[محجوب]" : output;
+      // Login identities and memory writes never leak into the visible trace.
+      const redacted = REDACTED_TOOLS.has(tool);
+      const detail = redacted ? "[محجوب]" : output;
       await event(runId, "tool", `${tool}${loopHint}`, detail.slice(0, 2000));
+      if (!ok) {
+        await event(runId, "step", "ظهرت مشكلة — بجرب طريقة تانية", output.slice(0, 400));
+      }
       transcript.push(
         `AGENT ${signature}${loopHint}\nRESULT(${ok ? "ok" : "fail"}): ${
-          REDACTED_TOOLS.has(tool) ? "[redacted]" : output.slice(0, 1500)
+          redacted ? "[redacted]" : output.slice(0, 1500)
         }`,
       );
+      if (!ok) {
+        transcript.push(
+          "OBSTACLE: the last action failed. Name the cause and try a different method or source — do not repeat it and do not stop the task.",
+        );
+      }
+
+      const steps = (run.step_count ?? 0) + 1;
+
+      // Supervisor pass: every few steps a second agent reads the log and hands
+      // the worker a concrete directive, which is what keeps multi-hour tasks
+      // from stalling or drifting.
+      let supervisor: string | null = run.result?.supervisor ?? null;
+      if (steps % 8 === 0 || repeats >= 2) {
+        const verdict = await superviseRun({
+          ...run,
+          step_count: steps,
+          result: { ...(run.result ?? {}), transcript },
+        } as RunRow);
+        if (verdict?.directive) {
+          supervisor = verdict.directive;
+          transcript.push(`SUPERVISOR: ${verdict.directive}`);
+          await event(runId, "step", "المشرف وجّهني", verdict.directive);
+        }
+      }
 
       run =
         (await patch(runId, {
           status: "running",
           phase: "executing",
           status_text: action.thought ? String(action.thought).slice(0, 200) : "بنفّذ…",
-          step_count: (run.step_count ?? 0) + 1,
+          step_count: steps,
           loop_strikes: repeats >= 2 ? (run.loop_strikes ?? 0) + 1 : 0,
           pending_guidance: [],
           pending_steering: [],
           result: {
             ...(run.result ?? {}),
+            supervisor,
+            self_solve: ok ? 0 : Number(run.result?.self_solve ?? 0),
             transcript: transcript.slice(-60),
             files: filesToArtifacts(ctx),
           },
         })) ?? run;
+
     }
 
     return run;
