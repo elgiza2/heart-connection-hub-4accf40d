@@ -19,6 +19,14 @@ export interface LongRun {
   last_heartbeat_at: string;
   result: any;
   error: string | null;
+  /** Kernel fields — plan / review / pause-and-ask / loop state. */
+  plan_id?: string | null;
+  review_round?: number | null;
+  budget_ms?: number | null;
+  needs_input?: boolean | null;
+  loop_strikes?: number | null;
+  step_count?: number | null;
+  sandbox_generation?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -32,6 +40,20 @@ export interface LongRunEvent {
   screenshot_url: string | null;
   created_at: string;
 }
+
+/** A question the agent paused on, waiting for the user. */
+export interface AgentQuestion {
+  id: string;
+  run_id: string;
+  question: string;
+  reason: string | null;
+  options: string[];
+  sensitive: boolean;
+  answer: string | null;
+  status: string;
+  asked_at: string;
+}
+
 
 /** How long a single sandbox lease lasts before the keep-alive extends it. */
 export const LEASE_SECONDS = 15 * 60;

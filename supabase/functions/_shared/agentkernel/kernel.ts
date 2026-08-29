@@ -1,0 +1,772 @@
+/**
+ * The agent kernel: one loop that behaves like a careful human worker.
+ *
+ *   recall memory -> plan -> (parallel tools) -> execute -> watch
+ *   -> loop detection -> pause & ask when unclear -> self-critique -> learn
+ *
+ * Every phase is persisted, so the loop is driven server-side by the
+ * `agent-tick` cron and survives the user closing the tab. Long runs (hours)
+ * checkpoint after every step and are resumed from the last checkpoint when the
+ * provider sandbox dies.
+ */
+import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { memoryBlock, recallMemory, learnFromRun, remember } from "./memory.ts";
+import { fingerprint, loopInstruction, verdictFor } from "./loopGuard.ts";
+import { askUser, detectBlock, detectLargeAmount, openQuestion, resolveQuestion } from "./questions.ts";
+import { critique, makePlan, savePlanReview } from "./planner.ts";
+import { webSearch } from "./tools.ts";
+
+const BU_BASE = Deno.env.get("BROWSER_USE_API_BASE") || "https://api.browser-use.com/api/v2";
+const MAX_REVIEW_ROUNDS = 3;
+const DEFAULT_BUDGET_MS = 6 * 60 * 60 * 1000;
+const MAX_STEPS = 600;
+
+export type RunRow = Record<string, any>;
+
+/* ------------------------------------------------------------------ provider */
+
+export async function browserUseKey(supabase: SupabaseClient): Promise<string> {
+  const { data, error } = await supabase
+    .from("provider_api_keys")
+    .select("api_key")
+    .eq("provider", "c")
+    .eq("status", "active")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error("Computer key lookup failed");
+  const key =
+    (data as { api_key?: string } | null)?.api_key?.trim() || Deno.env.get("BROWSER_USE_API_KEY");
+  if (!key) throw new Error("Computer provider is not configured yet");
+  return key;
+}
+
+export async function providerFetch(
+  supabase: SupabaseClient,
+  path: string,
+  init: RequestInit = {},
+) {
+  return fetch(`${BU_BASE}${path}`, {
+    ...init,
+    headers: {
+      "X-Browser-Use-API-Key": await browserUseKey(supabase),
+      "Content-Type": "application/json",
+      ...(init.headers ?? {}),
+    },
+  });
+}
+
+interface ProviderStep {
+  number?: number;
+  nextGoal?: string | null;
+  evaluationPreviousGoal?: string | null;
+  url?: string | null;
+  screenshotUrl?: string | null;
+}
+
+interface ProviderTask {
+  id: string;
+  sessionId?: string | null;
+  status?: string;
+  liveUrl?: string | null;
+  output?: string | null;
+  error?: string | null;
+  steps?: ProviderStep[];
+}
+
+export function mapStatus(status?: string) {
+  if (status === "created") return "queued";
+  if (status === "paused") return "paused";
+  if (status === "finished") return "done";
+  if (status === "stopped") return "canceled";
+  if (status === "failed") return "error";
+  return "running";
+}
+
+export async function getTask(
+  supabase: SupabaseClient,
+  taskId: string,
+): Promise<ProviderTask | null> {
+  const response = await providerFetch(supabase, `/tasks/${encodeURIComponent(taskId)}`);
+  if (!response.ok) return null;
+  const task = (await response.json().catch(() => null)) as ProviderTask | null;
+  if (!task) return null;
+  if (task.sessionId) {
+    const sessionResponse = await providerFetch(
+      supabase,
+      `/sessions/${encodeURIComponent(task.sessionId)}`,
+    ).catch(() => null);
+    if (sessionResponse?.ok) {
+      const session = (await sessionResponse.json().catch(() => null)) as
+        | { liveUrl?: string | null }
+        | null;
+      task.liveUrl = session?.liveUrl ?? null;
+    }
+  }
+  return task;
+}
+
+/* --------------------------------------------------------------- primitives */
+
+export async function addEvent(
+  supabase: SupabaseClient,
+  runId: string,
+  title: string,
+  type = "log",
+  detail?: string | null,
+) {
+  await supabase
+    .from("long_run_events")
+    .insert({ run_id: runId, type, title, detail: detail ?? null });
+}
+
+async function notify(
+  supabase: SupabaseClient,
+  run: RunRow,
+  title: string,
+  body: string,
+): Promise<void> {
+  if (run.notified_at) return;
+  await supabase.from("notifications").insert({
+    user_id: run.user_id,
+    title,
+    body,
+    type: "agent",
+    data: { run_id: run.id, goal: run.goal },
+  });
+  await supabase
+    .from("long_runs")
+    .update({ notified_at: new Date().toISOString() })
+    .eq("id", run.id);
+}
+
+async function traceOf(supabase: SupabaseClient, runId: string): Promise<string[]> {
+  const { data } = await supabase
+    .from("long_run_events")
+    .select("title,detail,type")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: true })
+    .limit(300);
+  return (data ?? []).map((event: any) =>
+    event.detail ? `${event.title} — ${event.detail}` : String(event.title),
+  );
+}
+
+async function checkpoint(
+  supabase: SupabaseClient,
+  run: RunRow,
+  stepNumber: number,
+  print: string,
+  lastAction: string,
+  state: Record<string, unknown>,
+): Promise<void> {
+  await supabase.from("agent_checkpoints").insert({
+    run_id: run.id,
+    user_id: run.user_id,
+    step_number: stepNumber,
+    fingerprint: print,
+    last_action: lastAction.slice(0, 500),
+    state,
+  });
+}
+
+async function lastCheckpoint(supabase: SupabaseClient, runId: string) {
+  const { data } = await supabase
+    .from("agent_checkpoints")
+    .select("*")
+    .eq("run_id", runId)
+    .order("step_number", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data;
+}
+
+async function planOf(supabase: SupabaseClient, planId?: string | null) {
+  if (!planId) return null;
+  const { data } = await supabase.from("agent_plans").select("*").eq("id", planId).maybeSingle();
+  return data;
+}
+
+/* ----------------------------------------------------------- prompt building */
+
+function buildInstruction(args: {
+  goal: string;
+  memory: string;
+  plan: string[];
+  research: string;
+  extra?: string | null;
+  resumeFrom?: string | null;
+}): string {
+  return [
+    args.goal,
+    args.plan.length ? `Plan you already agreed on:\n${args.plan.map((s, i) => `${i + 1}. ${s}`).join("\n")}` : "",
+    args.memory,
+    args.research ? `Research gathered before you started:\n${args.research}` : "",
+    args.resumeFrom ? `You are resuming an interrupted session. Last known state: ${args.resumeFrom}` : "",
+    args.extra ?? "",
+    [
+      "Rules:",
+      "- Never repeat an action that already failed; change method instead.",
+      "- If you hit a CAPTCHA, an OTP/2FA prompt, a login wall, a payment confirmation or an irreversible action, STOP and say exactly what you need. Do not guess.",
+      "- State clearly at the end whether the goal was achieved, with the evidence you saw.",
+    ].join("\n"),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function createTask(
+  supabase: SupabaseClient,
+  instruction: string,
+  sessionId?: string | null,
+): Promise<ProviderTask> {
+  const response = await providerFetch(supabase, "/tasks", {
+    method: "POST",
+    body: JSON.stringify(sessionId ? { task: instruction, sessionId } : { task: instruction }),
+  });
+  const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  const taskId = typeof data.id === "string" ? data.id : "";
+  if (!response.ok || !taskId) {
+    throw new Error(String(data.detail || data.error || `Provider HTTP ${response.status}`));
+  }
+  return (await getTask(supabase, taskId)) ?? { id: taskId };
+}
+
+/* -------------------------------------------------------------------- start */
+
+export async function startRun(
+  supabase: SupabaseClient,
+  userId: string,
+  args: { goal: string; conversationId?: string | null; budgetMs?: number },
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const goal = args.goal.trim();
+  if (!goal) return { status: 400, body: { error: "Empty goal" } };
+
+  const { data: run, error } = await supabase
+    .from("long_runs")
+    .insert({
+      user_id: userId,
+      conversation_id: args.conversationId ?? null,
+      goal,
+      status: "queued",
+      provider: "browser-use",
+      phase: "planning",
+      status_text: "Thinking about how to do this",
+      budget_ms: args.budgetMs ?? DEFAULT_BUDGET_MS,
+    })
+    .select("*")
+    .single();
+  if (error || !run) {
+    return { status: 500, body: { error: error?.message || "Run creation failed" } };
+  }
+
+  try {
+    // 1 — memory first, exactly like a human recalling the site.
+    const memories = await recallMemory(supabase, userId, goal);
+    const memory = memoryBlock(memories);
+    if (memories.length) {
+      await addEvent(
+        supabase,
+        run.id,
+        `Recalled ${memories.length} thing(s) from previous tasks`,
+        "memory",
+        memories.slice(0, 6).map((m) => `${m.key}: ${m.value}`).join("\n"),
+      );
+    }
+
+    // 2 — plan.
+    const plan = await makePlan(supabase, run, memory);
+    if (plan.steps.length) {
+      await addEvent(supabase, run.id, "Plan ready", "plan", plan.steps.join("\n"));
+    }
+
+    // 3 — blocking ambiguity? ask before burning provider minutes.
+    if (plan.clarify) {
+      await supabase.from("long_runs").update({ plan_id: plan.id }).eq("id", run.id);
+      await askUser(supabase, run, {
+        question: plan.clarify,
+        reason: "ambiguous_goal",
+        sensitive: false,
+      });
+      const { data: parked } = await supabase
+        .from("long_runs")
+        .select("*")
+        .eq("id", run.id)
+        .single();
+      return { status: 200, body: { ok: true, run: parked ?? run } };
+    }
+
+    // 4 — independent tools in parallel (the agent's own choice, from the plan).
+    const wantsSearch = (plan.tools ?? []).includes("web_search");
+    const [research] = await Promise.all([
+      wantsSearch ? webSearch(supabase, goal) : Promise.resolve(""),
+    ]);
+    if (research) {
+      await addEvent(supabase, run.id, "Searched the web before starting", "tool", research.slice(0, 800));
+    }
+
+    // 5 — execute.
+    const task = await createTask(
+      supabase,
+      buildInstruction({ goal, memory, plan: plan.steps, research }),
+    );
+    const { data: updated } = await supabase
+      .from("long_runs")
+      .update({
+        status: mapStatus(task.status),
+        phase: "working",
+        plan_id: plan.id,
+        external_run_id: task.id,
+        live_view_url: task.liveUrl ?? null,
+        status_text: plan.steps[0] ?? "Working",
+        last_heartbeat_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", run.id)
+      .select("*")
+      .single();
+    await addEvent(supabase, run.id, "Computer session started", "status");
+    return { status: 200, body: { ok: true, run: updated ?? run } };
+  } catch (thrown) {
+    const message = thrown instanceof Error ? thrown.message : "Failed to start task";
+    await supabase.from("long_runs").update({ status: "error", error: message }).eq("id", run.id);
+    await addEvent(supabase, run.id, "Failed to start", "error", message);
+    return { status: 502, body: { error: message } };
+  }
+}
+
+/* --------------------------------------------------------------------- tick */
+
+/**
+ * One kernel iteration for a single run. Safe to call from the client (status
+ * polling) and from cron — it is idempotent and does the same work either way.
+ */
+export async function tickRun(supabase: SupabaseClient, run: RunRow): Promise<RunRow> {
+  const status = typeof run.status === "string" ? run.status : "queued";
+  if (["done", "error", "canceled"].includes(status)) return run;
+  if (run.needs_input) return run;
+
+  const now = Date.now();
+  const startedAt = Date.parse(run.created_at ?? new Date().toISOString());
+  const budget = Number(run.budget_ms ?? DEFAULT_BUDGET_MS);
+  if (now - startedAt > budget) {
+    await finish(supabase, run, "error", "Time budget exhausted");
+    return { ...run, status: "error", error: "Time budget exhausted" };
+  }
+
+  const externalId = typeof run.external_run_id === "string" ? run.external_run_id : "";
+  if (!externalId) return run;
+
+  const task = await getTask(supabase, externalId);
+  if (!task) {
+    // Sandbox is gone — resume from the last checkpoint in a fresh session.
+    return await resumeAfterSandboxLoss(supabase, run);
+  }
+
+  const mapped = mapStatus(task.status);
+  const steps = Array.isArray(task.steps) ? task.steps : [];
+
+  // --- new steps become events + checkpoints -------------------------------
+  const { count } = await supabase
+    .from("long_run_events")
+    .select("id", { count: "exact", head: true })
+    .eq("run_id", run.id)
+    .eq("type", "thought");
+  const already = count ?? 0;
+  const fresh = steps.slice(already);
+  if (fresh.length) {
+    await supabase.from("long_run_events").insert(
+      fresh.map((step, index) => ({
+        run_id: run.id,
+        type: "thought",
+        title: step.nextGoal || step.evaluationPreviousGoal || `Step ${already + index + 1}`,
+        detail: [step.evaluationPreviousGoal, step.url].filter(Boolean).join(" · ") || null,
+        screenshot_url: step.screenshotUrl ?? null,
+      })),
+    );
+  }
+
+  const patch: Record<string, unknown> = {
+    status: mapped,
+    live_view_url: task.liveUrl ?? run.live_view_url ?? null,
+    step_count: steps.length,
+    last_heartbeat_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  if (mapped === "running") patch.phase = "working";
+
+  const latest = steps[steps.length - 1];
+  const latestText = [latest?.nextGoal, latest?.evaluationPreviousGoal, latest?.url]
+    .filter(Boolean)
+    .join(" · ");
+  if (latestText) patch.status_text = (latest?.nextGoal || latestText).slice(0, 240);
+
+  // --- loop detection ------------------------------------------------------
+  if (latest && fresh.length) {
+    const print = fingerprint([latest.nextGoal, latest.url]);
+    const strikes = print && print === run.last_fingerprint ? Number(run.loop_strikes ?? 0) + 1 : 0;
+    patch.last_fingerprint = print;
+    patch.loop_strikes = strikes;
+    await checkpoint(supabase, run, steps.length, print, latestText, {
+      url: latest.url ?? null,
+      goal: latest.nextGoal ?? null,
+      status: mapped,
+    });
+
+    const verdict = verdictFor(strikes);
+    if (verdict !== "ok") {
+      await addEvent(
+        supabase,
+        run.id,
+        `Repeated action detected (${strikes}x) — changing approach`,
+        "loop",
+        latestText,
+      );
+      if (verdict === "ask_user") {
+        await supabase.from("long_runs").update(patch).eq("id", run.id);
+        await remember(supabase, run.user_id, {
+          kind: "lesson",
+          key: `stuck:${(latest.nextGoal ?? "step").slice(0, 60)}`,
+          value: `Got stuck repeating "${latestText}" — needs another route.`,
+          source_run_id: run.id,
+        });
+        await askUser(supabase, run, {
+          question: `I'm stuck: "${latest.nextGoal ?? latestText}" keeps failing. How should I proceed?`,
+          reason: "loop",
+          sensitive: false,
+        });
+        const { data: parked } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+        return parked ?? { ...run, ...patch };
+      }
+      await providerFetch(supabase, `/tasks/${encodeURIComponent(externalId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "add_follow_up_task", task: loopInstruction(verdict, latestText) }),
+      }).catch(() => null);
+    }
+  }
+
+  // --- pause & ask ---------------------------------------------------------
+  const blockText = [latestText, task.output, task.error].filter(Boolean).join(" \n ");
+  const block = detectBlock(blockText) ?? detectLargeAmount(blockText);
+  if (block) {
+    await supabase.from("long_runs").update(patch).eq("id", run.id);
+    await providerFetch(supabase, `/tasks/${encodeURIComponent(externalId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "pause" }),
+    }).catch(() => null);
+    await askUser(supabase, { id: run.id, user_id: run.user_id }, block);
+    await notify(supabase, run, "Your task needs you", block.question);
+    const { data: parked } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+    return parked ?? { ...run, ...patch };
+  }
+
+  if (steps.length > MAX_STEPS) {
+    await supabase.from("long_runs").update(patch).eq("id", run.id);
+    await finish(supabase, run, "error", "Step budget exhausted");
+    return { ...run, status: "error" };
+  }
+
+  // --- provider says finished -> self-critique ----------------------------
+  if (mapped === "done") {
+    await supabase.from("long_runs").update(patch).eq("id", run.id);
+    return await reviewFinished(supabase, { ...run, ...patch }, task);
+  }
+
+  if (mapped === "error") {
+    patch.error = task.error || "Task failed";
+    await supabase.from("long_runs").update(patch).eq("id", run.id);
+    await finish(supabase, { ...run, ...patch }, "error", String(patch.error));
+    return { ...run, ...patch };
+  }
+
+  await supabase.from("long_runs").update(patch).eq("id", run.id);
+  if (mapped !== run.status) {
+    await addEvent(supabase, run.id, "Computer is working", "status");
+  }
+  return { ...run, ...patch };
+}
+
+/* --------------------------------------------------------- review / finish */
+
+async function reviewFinished(
+  supabase: SupabaseClient,
+  run: RunRow,
+  task: ProviderTask,
+): Promise<RunRow> {
+  const plan = await planOf(supabase, run.plan_id);
+  const planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
+  const round = Number(run.review_round ?? 0) + 1;
+  const trace = await traceOf(supabase, run.id);
+  const output = task.output ?? null;
+
+  const review = await critique(supabase, {
+    goal: String(run.goal ?? ""),
+    steps: planSteps,
+    successCriteria: plan?.steps?.success_criteria ?? null,
+    trace,
+    output,
+    round,
+  });
+  await savePlanReview(supabase, String(run.plan_id ?? ""), round, review);
+  await addEvent(supabase, run.id, `Self-review: ${review.verdict}`, "review", review.critique);
+
+  if (review.verdict === "ask" && review.question) {
+    await supabase.from("long_runs").update({ review_round: round }).eq("id", run.id);
+    await askUser(supabase, { id: run.id, user_id: run.user_id }, {
+      question: review.question,
+      reason: "review",
+      sensitive: false,
+    });
+    await notify(supabase, run, "Your task needs you", review.question);
+    const { data: parked } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+    return parked ?? run;
+  }
+
+  if (review.verdict === "retry" && round <= MAX_REVIEW_ROUNDS) {
+    const memory = memoryBlock(await recallMemory(supabase, run.user_id, String(run.goal ?? "")));
+    const instruction = buildInstruction({
+      goal: String(run.goal ?? ""),
+      memory,
+      plan: planSteps,
+      research: "",
+      extra: [
+        "Your previous attempt did NOT actually achieve the goal.",
+        `Review: ${review.critique}`,
+        review.fix_instruction ? `Do this differently: ${review.fix_instruction}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    try {
+      const next = await createTask(supabase, instruction);
+      await supabase
+        .from("long_runs")
+        .update({
+          status: mapStatus(next.status),
+          phase: "working",
+          review_round: round,
+          external_run_id: next.id,
+          live_view_url: next.liveUrl ?? null,
+          status_text: "Fixing what was missed",
+          loop_strikes: 0,
+          last_fingerprint: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", run.id);
+      await addEvent(supabase, run.id, "Retrying to finish the job properly", "status", review.critique);
+      const { data: retried } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+      return retried ?? run;
+    } catch {
+      /* fall through to accepting the result */
+    }
+  }
+
+  await finish(supabase, { ...run, review_round: round }, "done", null, output, review.critique);
+  const { data: finished } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+  return finished ?? run;
+}
+
+async function finish(
+  supabase: SupabaseClient,
+  run: RunRow,
+  status: "done" | "error",
+  error: string | null,
+  output?: string | null,
+  reviewNote?: string | null,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await supabase
+    .from("long_runs")
+    .update({
+      status,
+      phase: "finished",
+      review_round: run.review_round ?? 0,
+      result: status === "done" ? { output: output ?? null, review: reviewNote ?? null } : run.result ?? null,
+      error,
+      status_text: status === "done" ? "Task completed" : "Task failed",
+      expires_at: now,
+      updated_at: now,
+    })
+    .eq("id", run.id);
+  await addEvent(
+    supabase,
+    run.id,
+    status === "done" ? "Task finished" : "Task failed",
+    status === "done" ? "status" : "error",
+    error ?? output ?? null,
+  );
+  await notify(
+    supabase,
+    run,
+    status === "done" ? "Task finished" : "Task failed",
+    String(run.goal ?? "").slice(0, 160),
+  );
+  // Learn from the run whichever way it went.
+  const trace = await traceOf(supabase, run.id);
+  await learnFromRun(
+    supabase,
+    run.user_id,
+    run.id,
+    String(run.goal ?? ""),
+    trace,
+    status === "done" ? `success: ${output ?? ""}` : `failure: ${error ?? ""}`,
+  ).catch(() => null);
+}
+
+/* ------------------------------------------------------- sandbox resilience */
+
+async function resumeAfterSandboxLoss(supabase: SupabaseClient, run: RunRow): Promise<RunRow> {
+  const generation = Number(run.sandbox_generation ?? 0) + 1;
+  if (generation > 12) {
+    await finish(supabase, run, "error", "Lost the browser session too many times");
+    return { ...run, status: "error" };
+  }
+  const point = await lastCheckpoint(supabase, run.id);
+  const memory = memoryBlock(await recallMemory(supabase, run.user_id, String(run.goal ?? "")));
+  const plan = await planOf(supabase, run.plan_id);
+  const planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
+  try {
+    const task = await createTask(
+      supabase,
+      buildInstruction({
+        goal: String(run.goal ?? ""),
+        memory,
+        plan: planSteps,
+        research: "",
+        resumeFrom: point
+          ? `step ${point.step_number} — ${point.last_action ?? ""} (url: ${(point.state as any)?.url ?? "unknown"})`
+          : null,
+      }),
+    );
+    await supabase
+      .from("long_runs")
+      .update({
+        status: mapStatus(task.status),
+        external_run_id: task.id,
+        live_view_url: task.liveUrl ?? null,
+        sandbox_generation: generation,
+        status_text: "Resuming after the browser restarted",
+        loop_strikes: 0,
+        last_fingerprint: null,
+        last_heartbeat_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+    await addEvent(supabase, run.id, "Browser session restarted — resuming from last checkpoint", "status");
+    const { data } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+    return data ?? run;
+  } catch (error) {
+    await addEvent(
+      supabase,
+      run.id,
+      "Could not restart the browser session",
+      "error",
+      error instanceof Error ? error.message : null,
+    );
+    return run;
+  }
+}
+
+/* -------------------------------------------------------------- answer flow */
+
+/** The user answered the open question — feed it back and continue. */
+export async function answerRun(
+  supabase: SupabaseClient,
+  run: RunRow,
+  answer: string,
+): Promise<RunRow> {
+  const question = await openQuestion(supabase, run.id);
+  if (!question) return run;
+  await resolveQuestion(supabase, question.id, run.id, answer);
+  await addEvent(supabase, run.id, "You answered", "answer", answer.slice(0, 400));
+
+  if (!question.sensitive) {
+    await remember(supabase, run.user_id, {
+      kind: "preference",
+      key: `answer:${String(question.reason ?? "general").slice(0, 40)}`,
+      value: `When asked "${String(question.question).slice(0, 120)}" the user said: ${answer.slice(0, 200)}`,
+      source_run_id: run.id,
+    }).catch(() => null);
+  }
+
+  const externalId = typeof run.external_run_id === "string" ? run.external_run_id : "";
+  const followUp = `The user answered your question: ${answer}\nContinue the task from where you stopped.`;
+
+  if (externalId) {
+    const resumed = await providerFetch(supabase, `/tasks/${encodeURIComponent(externalId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "resume" }),
+    }).catch(() => null);
+    await providerFetch(supabase, `/tasks/${encodeURIComponent(externalId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "add_follow_up_task", task: followUp }),
+    }).catch(() => null);
+    if (resumed?.ok) {
+      await supabase
+        .from("long_runs")
+        .update({ status: "running", status_text: "Continuing", updated_at: new Date().toISOString() })
+        .eq("id", run.id);
+      const { data } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+      return data ?? run;
+    }
+  }
+
+  // No live session (e.g. clarification asked before execution) — start now.
+  const plan = await planOf(supabase, run.plan_id);
+  const planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
+  const memory = memoryBlock(await recallMemory(supabase, run.user_id, String(run.goal ?? "")));
+  try {
+    const task = await createTask(
+      supabase,
+      buildInstruction({
+        goal: String(run.goal ?? ""),
+        memory,
+        plan: planSteps,
+        research: "",
+        extra: `The user clarified: ${answer}`,
+      }),
+    );
+    await supabase
+      .from("long_runs")
+      .update({
+        status: mapStatus(task.status),
+        phase: "working",
+        external_run_id: task.id,
+        live_view_url: task.liveUrl ?? null,
+        status_text: planSteps[0] ?? "Working",
+        last_heartbeat_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+  } catch (error) {
+    await addEvent(
+      supabase,
+      run.id,
+      "Could not continue after your answer",
+      "error",
+      error instanceof Error ? error.message : null,
+    );
+  }
+  const { data } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+  return data ?? run;
+}
+
+/** Cron entry point: advance every live run, oldest heartbeat first. */
+export async function tickAllRuns(supabase: SupabaseClient, limit = 25): Promise<number> {
+  const { data } = await supabase
+    .from("long_runs")
+    .select("*")
+    .in("status", ["queued", "running", "paused"])
+    .eq("needs_input", false)
+    .order("last_heartbeat_at", { ascending: true, nullsFirst: true })
+    .limit(limit);
+  const runs = (data ?? []) as RunRow[];
+  for (const run of runs) {
+    try {
+      await tickRun(supabase, run);
+    } catch (error) {
+      console.error(`tick failed for run ${run.id}`, error);
+    }
+  }
+  return runs.length;
+}

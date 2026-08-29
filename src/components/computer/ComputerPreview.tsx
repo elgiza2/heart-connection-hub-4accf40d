@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Maximize2, Minimize2 } from "lucide-react";
 import { useLongRun } from "@/hooks/useLongRun";
 import { clearActiveComputerRun, setActiveComputerRun } from "@/lib/computer/activeRun";
+import { AgentQuestionCard } from "./AgentQuestionCard";
+
 
 function formatElapsed(from?: string | null): string {
   if (!from) return "0m";
@@ -27,7 +29,7 @@ export function ComputerPreview({
   plan?: string[];
   onClose?: () => void;
 }) {
-  const { run, events, stop } = useLongRun(runId);
+  const { run, events, question, stop, answer } = useLongRun(runId);
   const [control, setControl] = useState(false);
   const [openSteps, setOpenSteps] = useState(true);
   const [full, setFull] = useState(false);
@@ -117,6 +119,9 @@ export function ComputerPreview({
 
   return (
     <div className="flex flex-col gap-3">
+      {/* the agent stopped and needs a human answer before it can continue */}
+      {question && <AgentQuestionCard question={question} onAnswer={answer} />}
+
       {/* 0 — plan, before any step arrives */}
       {active && !events.length && (plan?.length ?? 0) > 0 && (
         <div className="flex flex-col gap-1.5 border-s border-border/40 ps-3">
