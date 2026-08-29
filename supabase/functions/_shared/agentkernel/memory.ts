@@ -65,7 +65,6 @@ export async function recallMemory(
 
   const ids = scored.map((row) => row.id).filter(Boolean) as string[];
   if (ids.length) {
-    await supabase.rpc; // no-op guard for older clients
     await supabase
       .from("agent_memory")
       .update({ last_used_at: new Date().toISOString() })
