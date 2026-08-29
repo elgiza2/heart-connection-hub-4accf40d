@@ -27,6 +27,9 @@ export interface LongRun {
   loop_strikes?: number | null;
   step_count?: number | null;
   sandbox_generation?: number | null;
+  /** Plan-approval gate: the agent waits for Continue, then proceeds itself. */
+  awaiting_plan_ack?: boolean | null;
+  auto_continue_at?: string | null;
   created_at: string;
   updated_at: string;
 }
