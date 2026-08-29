@@ -29,6 +29,21 @@ const TICK_DEADLINE_MS = 50_000;
 /** Announced out loud before the agent grades its own work. */
 const REVIEW_TEXT = "دلوقتي بأراجع اللي عملته";
 
+function redactToolInput(tool: string, input: Record<string, unknown>): string {
+  if (tool === "mcp_call") {
+    return JSON.stringify({
+      server: String(input.server ?? "").slice(0, 100),
+      tool: String(input.tool ?? "").slice(0, 100),
+      arguments: "[redacted]",
+    });
+  }
+  if (tool === "write_file") {
+    return JSON.stringify({ name: String(input.name ?? "artifact.txt").slice(0, 180), content: "[redacted]" });
+  }
+  if (tool === "run_code") return JSON.stringify({ code: "[redacted]" });
+  return JSON.stringify(input).slice(0, 800);
+}
+
 
 export type RunRow = Record<string, any> & {
   id: string;
