@@ -6413,6 +6413,7 @@ export type Database = {
           loop_strikes: number
           needs_input: boolean
           notified_at: string | null
+          pending_guidance: string[]
           phase: string | null
           plan_id: string | null
           provider: string | null
@@ -6445,6 +6446,7 @@ export type Database = {
           loop_strikes?: number
           needs_input?: boolean
           notified_at?: string | null
+          pending_guidance?: string[]
           phase?: string | null
           plan_id?: string | null
           provider?: string | null
@@ -6477,6 +6479,7 @@ export type Database = {
           loop_strikes?: number
           needs_input?: boolean
           notified_at?: string | null
+          pending_guidance?: string[]
           phase?: string | null
           plan_id?: string | null
           provider?: string | null
