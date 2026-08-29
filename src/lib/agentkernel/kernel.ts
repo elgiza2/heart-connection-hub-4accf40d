@@ -708,28 +708,44 @@ async function finish(
     },
   ]);
 
-  // The supervisor gets the last word: a premature finish is sent back to work.
+  // The supervisor gets the last word: a premature finish is sent back to work,
+  // and even a good finish gets one mandatory review pass ordered by the manager.
   const supervisor = round <= MAX_REVIEW_ROUNDS ? await superviseRun(run) : null;
   const supervisorBlocks = supervisor?.keep_going === true && !!supervisor.directive;
+  const needsReviewPass = round === 1 && verdict?.done !== false && !supervisorBlocks;
 
-  if ((verdict?.done === false || supervisorBlocks) && round <= MAX_REVIEW_ROUNDS) {
-    const gap = String(verdict?.gap ?? supervisor?.directive ?? "فيه حاجة ناقصة");
-    await event(runId, "step", "المراجعة لقت نقص — بكمّل", gap);
+  if ((verdict?.done === false || supervisorBlocks || needsReviewPass) && round <= MAX_REVIEW_ROUNDS) {
+    const gap = needsReviewPass
+      ? supervisor?.directive ??
+        "راجع كل اللي عملته خطوة خطوة، اتأكد إن كل مخرج موجود وصحيح، وبعدها بس اعتبرها خلصت."
+      : String(verdict?.gap ?? supervisor?.directive ?? "فيه حاجة ناقصة");
+    await event(
+      runId,
+      "step",
+      needsReviewPass ? "المشرف طلب مراجعة نهائية" : "المراجعة لقت نقص — بكمّل",
+      gap,
+    );
     return patch(runId, {
       status: "running",
       phase: "executing",
-      status_text: "بأستكمل النقص اللي لقيته في المراجعة",
+      status_text: needsReviewPass ? "بأراجع اللي عملته قبل التسليم" : "بأستكمل النقص اللي لقيته في المراجعة",
       review_round: round,
       result: {
         ...(run.result ?? {}),
-        supervisor: supervisor?.directive ?? null,
-        transcript: [...transcript, `SELF-REVIEW: not done yet — ${gap}`],
+        supervisor: gap,
+        transcript: [
+          ...transcript,
+          needsReviewPass ? `SUPERVISOR: ${gap}` : `SELF-REVIEW: not done yet — ${gap}`,
+        ],
         files: filesToArtifacts(ctx),
       },
     });
   }
 
-  await event(runId, "result", "خلصت", summary);
+  // The manager writes the message the user reads.
+  const files = filesToArtifacts(ctx);
+  const report = await supervisorReport(run, summary, [...ctx.files.keys()]);
+  await event(runId, "result", "خلصت", report);
   const updated = await patch(runId, {
     status: "done",
     phase: "finished",
@@ -738,11 +754,13 @@ async function finish(
     review_round: round,
     result: {
       ...(run.result ?? {}),
-      summary,
+      summary: report,
+      worker_summary: summary,
       transcript,
-      files: filesToArtifacts(ctx),
+      files,
     },
   });
+
   fileCache.delete(runId);
   return updated;
 }
