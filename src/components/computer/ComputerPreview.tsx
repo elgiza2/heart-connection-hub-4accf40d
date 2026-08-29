@@ -1,65 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, Maximize2, Minimize2 } from "lucide-react";
+import { ChevronDown, Monitor } from "lucide-react";
 import { useLongRun } from "@/hooks/useLongRun";
 import { clearActiveComputerRun, setActiveComputerRun } from "@/lib/computer/activeRun";
-import { AgentToolTrace } from "./AgentToolTrace";
-
-
-
-function formatElapsed(from?: string | null): string {
-  if (!from) return "0m";
-  const ms = Date.now() - Date.parse(from);
-  const mins = Math.max(0, Math.floor(ms / 60_000));
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
-}
 
 /**
- * Computer surface, split into clearly separate blocks:
- *   1. the live screen card (only while the task runs),
- *   2. the step / thinking trace (one live line, expandable to the full list),
- *   3. the final plain-text answer, rendered outside any card.
+ * Computer surface, reduced to two things only:
+ *   1. a single thinking badge in the chat while the agent works,
+ *   2. the computer card itself — clean rounded frame, one open/close toggle,
+ *      no titles, no buttons, no step lists.
+ * The final answer is rendered as plain chat text.
  */
 export function ComputerPreview({
   runId,
-  plan,
   onClose,
 }: {
   runId: string;
   plan?: string[];
   onClose?: () => void;
 }) {
-  const { run, events, question, stop, softStop, answer, approvePlan, steer } = useLongRun(runId);
-  const [control, setControl] = useState(false);
-  const [openSteps, setOpenSteps] = useState(true);
-  const [full, setFull] = useState(false);
+  const { run, events, question, answer } = useLongRun(runId);
+  const [open, setOpen] = useState(true);
   const [summary, setSummary] = useState<string | null>(null);
   const [reply, setReply] = useState("");
-  const [note, setNote] = useState("");
-  const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
   const summarizedRef = useRef(false);
-  const [, force] = useState(0);
-
-  useEffect(() => {
-    const id = window.setInterval(() => force((n) => n + 1), 60_000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  // live countdown on the auto-continue gate, rendered as plain text
-  const autoAt =
-    run?.awaiting_plan_ack && run.auto_continue_allowed !== false ? run.auto_continue_at : null;
-  useEffect(() => {
-    if (!autoAt) {
-      setSecondsLeft(null);
-      return;
-    }
-    const tick = () =>
-      setSecondsLeft(Math.max(0, Math.ceil((Date.parse(autoAt) - Date.now()) / 1000)));
-    tick();
-    const id = window.setInterval(tick, 1000);
-    return () => window.clearInterval(id);
-  }, [autoAt]);
 
   const active = run?.status === "running" || run?.status === "queued" || run?.status === "paused";
   const finished = !!run && !active;
@@ -70,12 +33,8 @@ export function ComputerPreview({
     else if (finished) clearActiveComputerRun(runId);
   }, [active, finished, runId]);
   useEffect(() => () => clearActiveComputerRun(runId), [runId]);
-  useEffect(() => {
-    if (finished) setFull(false);
-  }, [finished]);
 
-  // The run keeps going server-side, so tell the user when it lands or blocks —
-  // even if the tab was in the background the whole time.
+  // The run keeps going server-side, so tell the user when it lands or blocks.
   const notifiedRef = useRef<string | null>(null);
   useEffect(() => {
     const state = finished ? "finished" : question ? "needs_input" : null;
@@ -89,19 +48,20 @@ export function ComputerPreview({
           { body: run?.goal?.slice(0, 120) || "" },
         );
       } catch {
-        /* notifications blocked — the in-chat card is enough */
+        /* notifications blocked — the in-chat badge is enough */
       }
     };
     if (Notification.permission === "granted") show();
-    else if (Notification.permission === "default") void Notification.requestPermission().then((p) => {
-      if (p === "granted") show();
-    });
+    else if (Notification.permission === "default")
+      void Notification.requestPermission().then((p) => {
+        if (p === "granted") show();
+      });
   }, [finished, question, failed, run?.goal]);
 
   const url = useMemo(() => {
     if (!run?.live_view_url || finished) return null;
-    return control ? run.live_view_url : `${run.live_view_url}?view_only=true`;
-  }, [run?.live_view_url, control, finished]);
+    return `${run.live_view_url}?view_only=true`;
+  }, [run?.live_view_url, finished]);
 
   const rawOutput =
     (run?.result && (run.result.output as string | null)) ||
@@ -130,36 +90,13 @@ export function ComputerPreview({
   }, [finished, run, events, rawOutput, failed]);
 
   const finalText =
-    summary ||
-    rawOutput ||
-    (run?.status === "canceled" ? "Task stopped." : null);
-
-  // The plan checklist stays visible during execution, with live check marks.
-  const planText =
-    events.find((e) => e.type === "plan")?.detail || (plan ?? []).join("\n") || "";
-  const planLines = planText
-    .split("\n")
-    .map((line) => line.replace(/^\s*\d+[.)]\s*/, "").trim())
-    .filter(Boolean);
-  const doneCount = run?.awaiting_plan_ack
-    ? 0
-    : events.filter((e) => e.type === "step" || e.type === "tool").length;
+    summary || rawOutput || (run?.status === "canceled" ? "تم إيقاف المهمة." : null);
 
   const lastStep = events.length ? events[events.length - 1] : null;
-  const headline = active
-    ? run?.status_text || lastStep?.title || "Starting the computer…"
-    : run?.status === "error"
-      ? "Task failed"
-      : run?.status === "canceled"
-        ? "Stopped"
-        : "Task completed";
-
-  const traceLines: string[] = events.length
-    ? events.map((e) => (e.detail ? `${e.title} — ${e.detail}` : e.title))
-    : (plan ?? []);
+  const thinking = run?.status_text || lastStep?.title || "بفكر…";
 
   // Last screenshot captured by the agent — keeps the card meaningful after
-  // the live view is torn down instead of collapsing it to a single line.
+  // the live view is torn down.
   const lastShot = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i -= 1) {
       if (events[i]?.screenshot_url) return events[i].screenshot_url as string;
@@ -167,44 +104,18 @@ export function ComputerPreview({
     return null;
   }, [events]);
 
-  const resultFiles: { name?: string; url: string }[] = Array.isArray(run?.result?.files)
-    ? (run!.result.files as { name?: string; url: string }[]).filter((f) => f && f.url)
-    : [];
+  const hasScreen = !!url || !!lastShot;
 
   return (
-    <div className="flex flex-col gap-3">
-      {/* the work continues server-side even with the tab closed */}
+    <div className="flex flex-col gap-2.5">
+      {/* thinking badge — the only status surface in the chat */}
       {active && !question && (
-        <p className="text-[11.5px] text-muted-foreground">
-          شغال في الخلفية — تقدر تسيب الصفحة وهكمّل، وهبلّغك لما أخلّص.
-          {typeof run?.step_count === "number" ? ` · ${run.step_count} خطوة` : ""}
-          {` · ${formatElapsed(run?.created_at)}`}
-        </p>
-      )}
-
-      {/* the plan — plain text in the chat, no card */}
-      {planLines.length > 0 && !question && (
-        <div className="flex flex-col gap-1">
-          <p className="text-[13px] font-medium text-foreground">الخطة</p>
-          {planLines.map((step, i) => (
-            <p key={i} className="text-[13px] leading-relaxed text-muted-foreground">
-              {i < doneCount ? "✓ " : "• "}
-              {step}
-            </p>
-          ))}
-          {run?.awaiting_plan_ack && (
-            <p className="text-[12.5px] text-muted-foreground">
-              <button
-                type="button"
-                onClick={() => void approvePlan()}
-                className="text-primary underline-offset-2 hover:underline"
-              >
-                متابعة
-              </button>
-              {secondsLeft !== null ? ` — هكمّل تلقائيًا بعد ${secondsLeft} ثانية` : " — مستني موافقتك"}
-            </p>
-          )}
-        </div>
+        <span className="inline-flex w-fit items-center gap-2 text-[13px] text-muted-foreground">
+          <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--megsy-blue,#3b82f6)]" />
+          <span className="ai-shimmer truncate motion-reduce:animate-none" aria-live="polite">
+            {thinking}
+          </span>
+        </span>
       )}
 
       {/* the agent needs a human answer — plain text + one line of input */}
@@ -238,185 +149,48 @@ export function ComputerPreview({
         </div>
       )}
 
-
-      {/* 1 — computer card: live while running, kept (with the final frame) after */}
-      <div
-        className={
-          full && !finished
-            ? "fixed inset-0 z-50 flex flex-col bg-background"
-            : "overflow-hidden rounded-2xl border border-border/50 bg-card/40"
-        }
-      >
-        <div className="flex items-center gap-2 px-3 py-2 text-[12px]">
-          <span className="font-medium">Megsy Computer</span>
-          <span className="text-muted-foreground">{formatElapsed(run?.created_at)}</span>
-          {!active && (
-            <span
-              className={`inline-flex items-center gap-1 ${
-                failed ? "text-destructive" : "text-emerald-500"
-              }`}
-            >
-              {!failed && <Check className="h-3.5 w-3.5" />}
-              {headline}
-            </span>
-          )}
-          {active && (
-            <>
-              <button
-                type="button"
-                onClick={() => setControl((v) => !v)}
-                className={`ms-auto rounded-full px-2.5 py-1 text-[11px] transition-colors ${
-                  control
-                    ? "bg-[var(--megsy-blue,#3b82f6)]/15 text-[var(--megsy-blue,#3b82f6)]"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {control ? "View only" : "Take control"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setFull((v) => !v)}
-                aria-label={full ? "Exit full screen" : "Full screen"}
-                className="grid h-6 w-6 place-items-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
-              >
-                {full ? (
-                  <Minimize2 className="h-3.5 w-3.5" />
-                ) : (
-                  <Maximize2 className="h-3.5 w-3.5" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => void stop()}
-                className="rounded-full px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-              >
-                Stop
-              </button>
-            </>
-          )}
-        </div>
-
-        {(!finished || lastShot) && (
-          <div
-            className={`relative w-full bg-black/80 ${
-              full && !finished ? "flex-1" : "aspect-[16/10]"
-            }`}
+      {/* computer card — clean frame, single open/close toggle, nothing else */}
+      {hasScreen && (
+        <div className="overflow-hidden rounded-2xl border border-border/40 bg-card/30">
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            aria-label={open ? "إغلاق شاشة الكمبيوتر" : "فتح شاشة الكمبيوتر"}
+            className="flex w-full items-center justify-between px-3 py-2 text-muted-foreground transition-colors hover:text-foreground"
           >
-            {url ? (
-              <iframe
-                key={url}
-                src={url}
-                title="Megsy Computer live view"
-                className="absolute inset-0 h-full w-full border-0"
-                allow="clipboard-read; clipboard-write"
-                sandbox="allow-scripts allow-same-origin allow-forms"
-              />
-            ) : lastShot ? (
-              <img
-                src={lastShot}
-                alt="Last computer screenshot"
-                loading="lazy"
-                className="absolute inset-0 h-full w-full object-cover object-top"
-              />
-            ) : (
-              <div className="absolute inset-0 grid place-items-center px-6 text-center text-[12px] text-white/60">
-                {run?.error || "Preparing the screen…"}
-              </div>
-            )}
-            {!control && url && <div className="absolute inset-0" aria-hidden />}
-          </div>
-        )}
-
-        {/* current step / final headline, inside the card */}
-        <div className="flex items-center gap-2 px-3 py-2 text-[12px] text-muted-foreground">
-          {active ? (
-            <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--megsy-blue,#3b82f6)]" />
-          ) : failed ? (
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-destructive" />
-          ) : (
-            <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
-          )}
-          <span className={`truncate ${active ? "ai-shimmer motion-reduce:animate-none" : ""}`} aria-live="polite">
-            {headline}
-          </span>
-          {traceLines.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setOpenSteps((v) => !v)}
-              aria-expanded={openSteps}
-              aria-label="Steps"
-              className="ms-auto grid h-6 w-6 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
-            >
-              <ChevronDown
-                className={`h-3.5 w-3.5 transition-transform ${openSteps ? "rotate-180" : ""}`}
-              />
-            </button>
-          )}
-        </div>
-
-        {openSteps && traceLines.length > 0 && (
-          <div className="max-h-72 overflow-y-auto px-3 pb-3">
-            <AgentToolTrace events={events} fallback={plan ?? []} />
-          </div>
-        )}
-
-        {resultFiles.length > 0 && (
-          <div className="flex flex-wrap gap-2 px-3 pb-3">
-            {resultFiles.map((f) => (
-              <a
-                key={f.url}
-                href={f.url}
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-full bg-foreground/[0.06] px-3 py-1 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
-              >
-                {f.name || "File"}
-              </a>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* steering as one line of text: type a note, or stop */}
-      {active && !question && !run?.awaiting_plan_ack && (
-        <div className="flex flex-col gap-1">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const text = note.trim();
-              if (!text) return;
-              setNote("");
-              void steer(text);
-            }}
-            className="flex items-center gap-2"
-          >
-            <input
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="وجّهني وأنا شغال…"
-              className="flex-1 border-0 border-b border-border/50 bg-transparent px-0 py-1 text-[13px] outline-none focus:border-primary"
+            <Monitor className="h-4 w-4" />
+            <ChevronDown
+              className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`}
             />
-            <button type="submit" className="text-[12px] text-primary">
-              إرسال
-            </button>
-            <button
-              type="button"
-              onClick={() => void softStop()}
-              className="text-[12px] text-muted-foreground hover:text-foreground"
-            >
-              وقف بعد الخطوة
-            </button>
-          </form>
-          {(run?.pending_steering ?? []).concat(run?.pending_guidance ?? []).length > 0 && (
-            <p className="text-[11.5px] text-muted-foreground">
-              في الطابور: {(run?.pending_steering ?? []).concat(run?.pending_guidance ?? []).join(" · ")}
-            </p>
+          </button>
+
+          {open && (
+            <div className="relative aspect-[16/10] w-full bg-black/80">
+              {url ? (
+                <iframe
+                  key={url}
+                  src={url}
+                  title="Megsy Computer"
+                  className="absolute inset-0 h-full w-full border-0"
+                  allow="clipboard-read; clipboard-write"
+                  sandbox="allow-scripts allow-same-origin allow-forms"
+                />
+              ) : lastShot ? (
+                <img
+                  src={lastShot}
+                  alt=""
+                  loading="lazy"
+                  className="absolute inset-0 h-full w-full object-cover object-top"
+                />
+              ) : null}
+              {url && <div className="absolute inset-0" aria-hidden />}
+            </div>
           )}
         </div>
       )}
 
-
-      {/* 2 — final answer, plain text outside the card */}
+      {/* final answer, plain text */}
       {finished && finalText && (
         <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-foreground">
           {finalText}
@@ -429,7 +203,7 @@ export function ComputerPreview({
           onClick={onClose}
           className="self-start text-[11px] text-muted-foreground transition-colors hover:text-foreground"
         >
-          Close
+          إغلاق
         </button>
       )}
     </div>
