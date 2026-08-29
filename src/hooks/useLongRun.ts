@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import * as localKernel from "@/lib/agentkernel/kernel";
 import {
   KEEPALIVE_MS,
   type AgentQuestion,
   type LongRun,
   type LongRunEvent,
 } from "@/lib/longrun/types";
+
+/**
+ * The kernel runs in the `long-run` edge function whenever it is reachable —
+ * that version keeps working with the tab closed. If the function is missing or
+ * erroring, we transparently fall back to the in-tab kernel, which drives the
+ * same rows so the UI is identical (it just needs the tab open).
+ */
+let edgeAvailable = true;
 
 async function call(action: string, body: Record<string, unknown> = {}) {
   const { data: sessionData } = await supabase.auth.getSession();
@@ -17,8 +26,29 @@ async function call(action: string, body: Record<string, unknown> = {}) {
   }>("long-run", {
     body: { action, ...body, token },
   });
-  if (error) throw new Error("خدمة الكمبيوتر مش متاحة دلوقتي. جرّب تاني بعد لحظة.");
+  if (error) {
+    edgeAvailable = false;
+    throw error;
+  }
+  edgeAvailable = true;
   return data ?? {};
+}
+
+/** Runs the edge action, and on failure the equivalent in-tab kernel action. */
+async function withFallback(
+  action: string,
+  body: Record<string, unknown>,
+  local: () => Promise<LongRun | null>,
+): Promise<LongRun | null> {
+  if (edgeAvailable) {
+    try {
+      const res = await call(action, body);
+      if (res.run) return res.run;
+    } catch {
+      /* fall through to the in-tab kernel */
+    }
+  }
+  return local();
 }
 
 export async function startLongRun(
@@ -26,53 +56,57 @@ export async function startLongRun(
   conversationId?: string | null,
   budgetMs?: number,
 ) {
-  const res = await call("start", {
-    goal,
-    conversation_id: conversationId ?? null,
-    ...(budgetMs ? { budget_ms: budgetMs } : {}),
-  });
-  return res.run ?? null;
+  return withFallback(
+    "start",
+    {
+      goal,
+      conversation_id: conversationId ?? null,
+      ...(budgetMs ? { budget_ms: budgetMs } : {}),
+    },
+    () => localKernel.startRun(goal, conversationId ?? null, budgetMs),
+  );
 }
 
 export async function stopLongRun(runId: string) {
-  await call("stop", { run_id: runId });
+  await withFallback("stop", { run_id: runId }, () => localKernel.stop(runId));
 }
 
 export async function approveLongRunPlan(runId: string, planSteps?: string[]) {
-  const res = await call("approve_plan", {
-    run_id: runId,
-    ...(planSteps && planSteps.length ? { plan_steps: planSteps } : {}),
-  });
-  return res.run ?? null;
+  return withFallback(
+    "approve_plan",
+    { run_id: runId, ...(planSteps && planSteps.length ? { plan_steps: planSteps } : {}) },
+    () => localKernel.approvePlan(runId, planSteps),
+  );
 }
 
 export async function guideLongRun(runId: string, guidance: string) {
-  const res = await call("guide", { run_id: runId, guidance });
-  return res.run ?? null;
+  return withFallback("guide", { run_id: runId, guidance }, () =>
+    localKernel.guide(runId, guidance),
+  );
 }
 
 export async function steerLongRun(runId: string, guidance: string) {
-  const res = await call("steer", { run_id: runId, guidance });
-  return res.run ?? null;
+  return withFallback("steer", { run_id: runId, guidance }, () =>
+    localKernel.steer(runId, guidance),
+  );
 }
 
 export async function softStopLongRun(runId: string) {
-  const res = await call("soft_stop", { run_id: runId });
-  return res.run ?? null;
+  return withFallback("soft_stop", { run_id: runId }, () => localKernel.softStop(runId));
 }
 
 export async function answerLongRun(runId: string, answer: string) {
-  const res = await call("answer", { run_id: runId, answer });
-  return res.run ?? null;
+  return withFallback("answer", { run_id: runId, answer }, () =>
+    localKernel.answer(runId, answer),
+  );
 }
 
 /**
  * Live view of a long run.
  *
- * The run itself is advanced server-side by the `agent-tick` cron, so it keeps
- * going with the tab closed. This hook only mirrors state (realtime + a light
- * poll while visible) and surfaces the agent's open question so the user can
- * unblock it.
+ * When the edge kernel is reachable the run is advanced server-side by cron, so
+ * it keeps going with the tab closed and this hook only mirrors state. When we
+ * are on the in-tab fallback, this hook's poll is what advances the run.
  */
 export function useLongRun(runId: string | null) {
   const [run, setRun] = useState<LongRun | null>(null);
@@ -125,7 +159,12 @@ export function useLongRun(runId: string | null) {
       )
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "long_run_events", filter: `run_id=eq.${runId}` },
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "long_run_events",
+          filter: `run_id=eq.${runId}`,
+        },
         (p) => setEvents((prev) => [...prev, p.new as unknown as LongRunEvent]),
       )
       .on(
@@ -141,9 +180,8 @@ export function useLongRun(runId: string | null) {
     };
   }, [runId, loadQuestion]);
 
-  // While the tab is open, poll the kernel so steps stream in quickly. The cron
-  // tick does the same work server-side, so stopping this changes nothing but
-  // the refresh rate.
+  // Advance the run while the tab is open. With the edge kernel this only
+  // refreshes faster than cron; on the fallback it is the engine itself.
   useEffect(() => {
     if (!runId) return;
     const active = run?.status === "running" || run?.status === "paused" || run?.status === "queued";
@@ -153,11 +191,21 @@ export function useLongRun(runId: string | null) {
       if (beating.current || document.hidden) return;
       beating.current = true;
       try {
-        const res = await call("keepalive", { run_id: runId });
-        if (res.run) setRun(res.run);
-        if (res.question !== undefined) setQuestion(res.question ?? null);
+        if (edgeAvailable) {
+          try {
+            const res = await call("keepalive", { run_id: runId });
+            if (res.run) setRun(res.run);
+            if (res.question !== undefined) setQuestion(res.question ?? null);
+            return;
+          } catch {
+            /* fall through to the in-tab kernel */
+          }
+        }
+        const updated = await localKernel.tick(runId);
+        if (updated) setRun(updated);
+        await loadQuestion(runId);
       } catch {
-        /* the server-side tick keeps the run moving anyway */
+        /* next poll retries */
       } finally {
         beating.current = false;
       }
@@ -165,7 +213,7 @@ export function useLongRun(runId: string | null) {
     void ping();
     const id = window.setInterval(ping, Math.min(8_000, KEEPALIVE_MS));
     return () => window.clearInterval(id);
-  }, [runId, run?.status, run?.needs_input]);
+  }, [runId, run?.status, run?.needs_input, loadQuestion]);
 
   const approvePlan = useCallback(
     async (planSteps?: string[]) => {
@@ -216,3 +264,4 @@ export function useLongRun(runId: string | null) {
 
   return { run, events, question, stop, softStop, answer, approvePlan, guide, steer };
 }
+
