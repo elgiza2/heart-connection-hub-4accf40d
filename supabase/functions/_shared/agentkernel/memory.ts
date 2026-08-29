@@ -93,27 +93,15 @@ export async function remember(
   const value = row.value.trim().slice(0, 2000);
   if (!key || !value) return;
   const domain = row.domain?.trim().toLowerCase() || null;
-  const { data: existing } = await supabase
+  let lookup = supabase
     .from("agent_memory")
     .select("id,hits,confidence")
     .eq("user_id", userId)
     .eq("kind", row.kind)
-    .eq("key", key)
-    .is("domain", domain === null ? null : undefined)
-    .maybeSingle();
+    .eq("key", key);
+  lookup = domain ? lookup.eq("domain", domain) : lookup.is("domain", null);
+  const { data: found } = await lookup.maybeSingle();
 
-  const found = domain
-    ? (
-        await supabase
-          .from("agent_memory")
-          .select("id,hits,confidence")
-          .eq("user_id", userId)
-          .eq("kind", row.kind)
-          .eq("key", key)
-          .eq("domain", domain)
-          .maybeSingle()
-      ).data
-    : existing;
 
   if (found?.id) {
     await supabase
