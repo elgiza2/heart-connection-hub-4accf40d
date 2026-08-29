@@ -289,13 +289,17 @@ export async function startRun(
 
     // 2 — plan.
     const plan = await makePlan(supabase, run, memory);
-    if (plan.steps.length) {
-      await addEvent(supabase, run.id, "Plan ready", "plan", plan.steps.join("\n"));
-    }
+    const planText = [
+      ...plan.steps.map((step, index) => `${index + 1}. ${step}`),
+      plan.success_criteria ? `\nمعيار النجاح: ${plan.success_criteria}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     // 3 — blocking ambiguity? ask before burning provider minutes.
     if (plan.clarify) {
       await supabase.from("long_runs").update({ plan_id: plan.id }).eq("id", run.id);
+      if (plan.steps.length) await addEvent(supabase, run.id, "الخطة", "plan", planText);
       await askUser(supabase, run, {
         question: plan.clarify,
         reason: "ambiguous_goal",
@@ -309,37 +313,31 @@ export async function startRun(
       return { status: 200, body: { ok: true, run: parked ?? run } };
     }
 
-    // 4 — independent tools in parallel (the agent's own choice, from the plan).
-    const wantsSearch = (plan.tools ?? []).includes("web_search");
-    const [research] = await Promise.all([
-      wantsSearch ? webSearch(supabase, goal) : Promise.resolve(""),
-    ]);
-    if (research) {
-      await addEvent(supabase, run.id, "Searched the web before starting", "tool", research.slice(0, 800));
-    }
-
-    // 5 — execute.
-    const task = await createTask(
+    // 4 — show the plan and wait for "Continue" — for 60s only, then go ahead.
+    await addEvent(
       supabase,
-      buildInstruction({ goal, memory, plan: plan.steps, research }),
+      run.id,
+      "دي الخطة اللي هأمشي عليها",
+      "plan",
+      planText || String(run.goal ?? ""),
     );
-    const { data: updated } = await supabase
+    const { data: pending } = await supabase
       .from("long_runs")
       .update({
-        status: mapStatus(task.status),
-        phase: "working",
         plan_id: plan.id,
-        external_run_id: task.id,
-        live_view_url: task.liveUrl ?? null,
-        status_text: plan.steps[0] ?? "Working",
+        kind: plan.kind === "browser" ? "browser" : "agentic",
+        status: "paused",
+        phase: "plan_review",
+        awaiting_plan_ack: true,
+        auto_continue_at: new Date(Date.now() + PLAN_ACK_MS).toISOString(),
+        status_text: "مستني موافقتك على الخطة (هكمّل تلقائي بعد 60 ثانية)",
         last_heartbeat_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
       .eq("id", run.id)
       .select("*")
       .single();
-    await addEvent(supabase, run.id, "Computer session started", "status");
-    return { status: 200, body: { ok: true, run: updated ?? run } };
+    return { status: 200, body: { ok: true, run: pending ?? run } };
   } catch (thrown) {
     const message = thrown instanceof Error ? thrown.message : "Failed to start task";
     await supabase.from("long_runs").update({ status: "error", error: message }).eq("id", run.id);
@@ -347,6 +345,80 @@ export async function startRun(
     return { status: 502, body: { error: message } };
   }
 }
+
+/* ------------------------------------------------------ plan ack / execution */
+
+/** The user pressed Continue (or the 60s timer expired) — start doing the work. */
+export async function beginExecution(
+  supabase: SupabaseClient,
+  run: RunRow,
+  auto = false,
+): Promise<RunRow> {
+  const goal = String(run.goal ?? "");
+  const plan = await planOf(supabase, run.plan_id);
+  const planSteps: string[] = Array.isArray(plan?.steps?.steps) ? plan!.steps.steps : [];
+  const planTools: string[] = Array.isArray(plan?.steps?.tools) ? plan!.steps.tools : [];
+  const memory = memoryBlock(await recallMemory(supabase, run.user_id, goal));
+
+  await supabase
+    .from("long_runs")
+    .update({
+      awaiting_plan_ack: false,
+      auto_continue_at: null,
+      status: "running",
+      phase: "working",
+      status_text: planSteps[0] ?? "بدأت الشغل",
+      last_heartbeat_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", run.id);
+  await addEvent(
+    supabase,
+    run.id,
+    auto ? "كمّلت تلقائيًا بعد انتهاء المهلة" : "تمت الموافقة على الخطة — بدأت التنفيذ",
+    "status",
+  );
+
+  // Independent pre-work the agent asked for in its own plan.
+  if (planTools.includes("web_search")) {
+    const research = await webSearch(supabase, goal);
+    if (research) {
+      await addEvent(supabase, run.id, "بحثت قبل البدء", "tool", research.slice(0, 1200));
+    }
+  }
+
+  const fresh = { ...run, awaiting_plan_ack: false, status: "running", phase: "working" } as RunRow;
+
+  // Coding / integrations / MCP / mixed work runs in the agentic executor.
+  if (String(run.kind ?? "agentic") !== "browser") {
+    return await tickAgentic(supabase, fresh);
+  }
+
+  try {
+    const task = await createTask(
+      supabase,
+      buildInstruction({ goal, memory, plan: planSteps, research: "" }),
+    );
+    await supabase
+      .from("long_runs")
+      .update({
+        status: mapStatus(task.status),
+        external_run_id: task.id,
+        live_view_url: task.liveUrl ?? null,
+        last_heartbeat_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+    await addEvent(supabase, run.id, "Computer session started", "status");
+  } catch (thrown) {
+    const message = thrown instanceof Error ? thrown.message : "Failed to start task";
+    await supabase.from("long_runs").update({ status: "error", error: message }).eq("id", run.id);
+    await addEvent(supabase, run.id, "Failed to start", "error", message);
+  }
+  const { data } = await supabase.from("long_runs").select("*").eq("id", run.id).single();
+  return (data as RunRow) ?? fresh;
+}
+
 
 /* --------------------------------------------------------------------- tick */
 
