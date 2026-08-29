@@ -30,6 +30,8 @@ export interface LongRun {
   /** Plan-approval gate: the agent waits for Continue, then proceeds itself. */
   awaiting_plan_ack?: boolean | null;
   auto_continue_at?: string | null;
+  /** Notes the user queued mid-run; folded into the agent's next decision. */
+  pending_guidance?: string[] | null;
   created_at: string;
   updated_at: string;
 }
