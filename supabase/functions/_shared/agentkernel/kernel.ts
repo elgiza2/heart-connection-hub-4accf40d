@@ -864,6 +864,15 @@ async function reviewFinished(
   const trace = await traceOf(supabase, run.id);
   const output = task.output ?? null;
 
+  // Say it out loud before grading itself.
+  await supabase
+    .from("long_runs")
+    .update({ phase: "reviewing", status_text: REVIEW_TEXT, updated_at: new Date().toISOString() })
+    .eq("id", run.id);
+  await addEvent(supabase, run.id, REVIEW_TEXT, "status", output);
+
+
+
   const review = await critique(supabase, {
     goal: String(run.goal ?? ""),
     steps: planSteps,
