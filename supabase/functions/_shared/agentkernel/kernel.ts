@@ -820,7 +820,25 @@ export async function tickAgentic(supabase: SupabaseClient, run: RunRow): Promis
       "observation",
       outcome.observation.slice(0, 4000),
     );
+    // Deliverables are collected on the run so the chat can offer them for download.
+    if (outcome.artifact) {
+      const { data: row } = await supabase
+        .from("long_runs")
+        .select("result")
+        .eq("id", current.id)
+        .maybeSingle();
+      const result = ((row as any)?.result ?? {}) as Record<string, unknown>;
+      const files = Array.isArray(result.files)
+        ? (result.files as { name?: string; url: string }[])
+        : [];
+      if (!files.some((f) => f.url === outcome.artifact!.url)) files.push(outcome.artifact);
+      await supabase
+        .from("long_runs")
+        .update({ result: { ...result, files }, updated_at: new Date().toISOString() })
+        .eq("id", current.id);
+    }
   }
+
 
   const { data } = await supabase.from("long_runs").select("*").eq("id", current.id).single();
   return (data as RunRow) ?? current;
