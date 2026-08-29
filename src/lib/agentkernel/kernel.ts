@@ -316,22 +316,29 @@ export async function startRun(
   const memory = await recallMemory(userId);
   const plan = await makePlan(goal, memory);
   const risk = riskFloor(goal) === "high" ? "high" : plan.risk;
-  const autoAllowed = risk === "low";
 
-  await event(run.id, "plan", "الخطة", plan.steps.map((s, i) => `${i + 1}. ${s}`).join("\n"));
+  // The supervisor — not the user — signs off the plan and issues the first order.
+  const approved = await supervisorReviewPlan(goal, plan.steps, memory);
+
+  await event(run.id, "plan", "الخطة", approved.steps.map((s, i) => `${i + 1}. ${s}`).join("\n"));
+  await event(run.id, "step", "المشرف وجّهني", approved.directive);
   return patch(run.id, {
-    status: "paused",
-    phase: "plan_review",
-    status_text: autoAllowed ? "الخطة جاهزة — هكمل تلقائيًا" : "الخطة جاهزة — محتاج موافقتك",
-    awaiting_plan_ack: true,
-    auto_continue_allowed: autoAllowed,
-    auto_continue_at: autoAllowed
-      ? new Date(Date.now() + AUTO_CONTINUE_MS).toISOString()
-      : null,
+    status: "running",
+    phase: "executing",
+    status_text: "بنفّذ…",
+    awaiting_plan_ack: false,
+    auto_continue_allowed: true,
+    auto_continue_at: null,
     risk_level: risk,
-    result: { ...(run.result ?? {}), plan: plan.steps, transcript: [] },
+    result: {
+      ...(run.result ?? {}),
+      plan: approved.steps,
+      supervisor: approved.directive,
+      transcript: [`SUPERVISOR: ${approved.directive}`],
+    },
   });
 }
+
 
 export async function approvePlan(runId: string, planSteps?: string[]): Promise<RunRow | null> {
   const run = await loadRun(runId);
