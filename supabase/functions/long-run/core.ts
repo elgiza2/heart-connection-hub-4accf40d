@@ -29,6 +29,8 @@ export interface LongRunPayload {
   budget_ms?: number;
   conversation_id?: string | null;
   run_id?: string;
+  plan_steps?: string[];
+
 }
 
 function db() {
@@ -96,7 +98,14 @@ export async function handleLongRun(payload: LongRunPayload | null, tickSecret?:
     const run = await loadOwnedRun(supabase, user.id, payload.run_id);
     if (!run) return { status: 404, body: { error: "Unknown run" } };
     if (!run.awaiting_plan_ack) return { status: 200, body: { ok: true, run } };
-    return { status: 200, body: { ok: true, run: await beginExecution(supabase, run) } };
+    const steps = Array.isArray(payload.plan_steps)
+      ? payload.plan_steps.map((s) => String(s)).filter((s) => s.trim().length > 0)
+      : undefined;
+    return {
+      status: 200,
+      body: { ok: true, run: await beginExecution(supabase, run, false, steps) },
+    };
+
   }
 
   if (payload?.action === "answer") {
