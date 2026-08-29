@@ -9,7 +9,7 @@
  * checkpoint after every step and are resumed from the last checkpoint when the
  * provider sandbox dies.
  */
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { memoryBlock, recallMemory, learnFromRun, remember } from "./memory.ts";
 import { fingerprint, loopInstruction, verdictFor } from "./loopGuard.ts";
 import { askUser, detectBlock, detectLargeAmount, openQuestion, resolveQuestion } from "./questions.ts";

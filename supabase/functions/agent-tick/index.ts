@@ -4,7 +4,7 @@
  * Called every minute by pg_cron, so long tasks keep going (hours) whether or
  * not the user has the app open. Guarded by a shared secret.
  */
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders } from "npm:@supabase/supabase-js@2/cors";
 import { tickAllRuns } from "../_shared/agentkernel/kernel.ts";
 

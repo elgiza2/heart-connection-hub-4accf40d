@@ -2,7 +2,7 @@
  * Long-run HTTP surface. All the intelligence lives in the shared agent kernel
  * (`_shared/agentkernel`) so the same loop runs from the browser and from cron.
  */
-import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { addEvent, answerRun, providerFetch, startRun, tickRun } from "../_shared/agentkernel/kernel.ts";
 import { openQuestion } from "../_shared/agentkernel/questions.ts";
 
