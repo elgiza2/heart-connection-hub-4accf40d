@@ -211,12 +211,75 @@ async function superviseRun(run: RunRow): Promise<{ keep_going: boolean; directi
   return { keep_going: parsed.keep_going !== false, directive };
 }
 
+/**
+ * The supervisor signs off the plan instead of the user: it reads the plan like a
+ * manager would, adjusts it, and hands the worker its opening order.
+ */
+async function supervisorReviewPlan(
+  goal: string,
+  plan: string[],
+  memory: string,
+): Promise<{ steps: string[]; directive: string }> {
+  const parsed = await askJson<{ steps?: unknown; directive?: unknown }>(
+    `You are the supervising manager of a worker agent. The worker proposed a plan for a task.
+You approve or rewrite it yourself — the user is NOT asked. Reply with JSON only:
+{"steps":["..."],"directive":"the first concrete order for the worker, in the user's language"}
+Keep 3-8 steps, remove filler, add any verification step the worker forgot.`,
+    [
+      {
+        role: "user",
+        content: [memory, `Task: ${goal}`, `Proposed plan:\n- ${plan.join("\n- ")}`]
+          .filter(Boolean)
+          .join("\n\n"),
+      },
+    ],
+  );
+  const steps = Array.isArray(parsed?.steps)
+    ? parsed!.steps.map((s) => String(s)).filter(Boolean).slice(0, 8)
+    : [];
+  return {
+    steps: steps.length ? steps : plan,
+    directive: String(parsed?.directive ?? "ابدأ بأول خطوة في الخطة ونفّذها بالكامل.").slice(0, 500),
+  };
+}
+
+/**
+ * The supervisor writes the message the user actually reads: what happened, what
+ * was delivered, and — when something is blocking — what it needs from the user
+ * plus the options it suggests.
+ */
+async function supervisorReport(
+  run: RunRow,
+  summary: string,
+  files: string[],
+): Promise<string> {
+  const transcript: string[] = Array.isArray(run.result?.transcript) ? run.result.transcript : [];
+  const text = await askModel(
+    `You are the supervising manager reporting to the user in their own language (Arabic if the task is Arabic).
+Write a short clean report: what was accomplished, what was delivered, and any problem that came up with the options you suggest for it.
+No JSON, no markdown headers, no bullet spam — at most 6 short lines. Never invent results.`,
+    [
+      {
+        role: "user",
+        content: [
+          `Task: ${run.goal}`,
+          `Worker summary: ${summary}`,
+          `Files delivered: ${files.join(", ") || "none"}`,
+          `Work log:\n${transcript.slice(-24).join("\n")}`,
+        ].join("\n\n"),
+      },
+    ],
+  );
+  return (text?.trim() || summary).slice(0, 2000);
+}
+
 /** Blockers a human really has to handle — everything else the agent solves itself. */
 function needsHuman(text: string): boolean {
   return /(captcha|كابتشا|recaptcha|2fa|two-factor|otp|كود التحقق|verification code|payment|credit card|بطاقة|ادفع|الدفع|refund|delete account|حذف الحساب)/i.test(
     text,
   );
 }
+
 
 
 /* -------------------------------------------------------------------- public */
