@@ -3,11 +3,26 @@
  * (`_shared/agentkernel`) so the same loop runs from the browser and from cron.
  */
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
-import { addEvent, answerRun, providerFetch, startRun, tickAllRuns, tickRun } from "../_shared/agentkernel/kernel.ts";
+import {
+  addEvent,
+  answerRun,
+  beginExecution,
+  providerFetch,
+  startRun,
+  tickAllRuns,
+  tickRun,
+} from "../_shared/agentkernel/kernel.ts";
 import { openQuestion } from "../_shared/agentkernel/questions.ts";
 
 export interface LongRunPayload {
-  action?: "start" | "keepalive" | "status" | "stop" | "answer" | "cron_tick";
+  action?:
+    | "start"
+    | "keepalive"
+    | "status"
+    | "stop"
+    | "answer"
+    | "approve_plan"
+    | "cron_tick";
   token?: string;
   goal?: string;
   answer?: string;
@@ -75,6 +90,13 @@ export async function handleLongRun(payload: LongRunPayload | null, tickSecret?:
       status: 200,
       body: { ok: true, run: advanced, question: await openQuestion(supabase, run.id) },
     };
+  }
+
+  if (payload?.action === "approve_plan") {
+    const run = await loadOwnedRun(supabase, user.id, payload.run_id);
+    if (!run) return { status: 404, body: { error: "Unknown run" } };
+    if (!run.awaiting_plan_ack) return { status: 200, body: { ok: true, run } };
+    return { status: 200, body: { ok: true, run: await beginExecution(supabase, run) } };
   }
 
   if (payload?.action === "answer") {
